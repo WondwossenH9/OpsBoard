@@ -2,95 +2,147 @@
 
 OpsBoard is a production-inspired incident management platform built to demonstrate modern DevOps engineering practices.
 
-This project is being developed incrementally, following real-world engineering workflows, from a simple Flask API to a production-ready platform deployed on AWS with automated CI/CD and Kubernetes.
+The project is being developed incrementally using real-world engineering workflows—from a simple Flask REST API to a production-ready cloud-native application deployed on AWS with automated CI/CD and Kubernetes.
 
 ---
 
 ## Project Goals
 
-- Learn Docker and Docker Compose
-- Build production-quality containerized applications
-- Deploy to AWS
-- Automate deployments with GitHub Actions
-- Provision infrastructure using Terraform
-- Orchestrate services with Kubernetes
-- Document engineering decisions and architecture
+* Learn modern DevOps practices through a real project
+* Build production-quality containerized applications
+* Deploy applications to AWS
+* Automate deployments using GitHub Actions
+* Provision infrastructure with Terraform
+* Orchestrate containers using Kubernetes
+* Document engineering decisions throughout the project
 
 ---
 
 ## Current Status
 
-Sprint 2 (In Progress)
+**Sprint 4 Completed – Reverse Proxy Architecture**
 
-Current functionality:
+### Current Features
 
-- Health endpoint
-- Incident API
-- Hardcoded incident data
+* Flask REST API
+* Health check endpoint
+* Incident API
+* Dockerized backend
+* Docker Compose orchestration
+* Nginx reverse proxy
+* Automatic Docker networking
+* Internal DNS-based service discovery
 
-Upcoming:
+### Current Architecture
 
-- Dockerfile
-- Docker Compose
-- Nginx reverse proxy
-- MySQL
-- AWS deployment
+```text
+                 Browser
+                     │
+                     ▼
+                  Nginx
+             Reverse Proxy
+                     │
+         Docker Compose Network
+                     │
+                     ▼
+              Flask Backend
+```
+
+### Next Sprint
+
+* Integrate MySQL
+* Persist incident data using Docker Volumes
+* Replace in-memory data with a real database
 
 ---
 
 ## Technology Stack
 
-- Python
-- Flask
-- Docker (coming next)
-- Docker Compose (planned)
-- Nginx (planned)
-- MySQL (planned)
-- AWS (planned)
-- GitHub Actions (planned)
-- Terraform (planned)
-- Kubernetes (planned)
+### Current
+
+* Python
+* Flask
+* Docker
+* Docker Compose
+* Nginx
+
+### Planned
+
+* MySQL
+* AWS EC2
+* GitHub Actions
+* Terraform
+* Kubernetes
 
 ---
 
 ## Repository Structure
 
-```
+```text
 opsboard/
-
-backend/
-frontend/
-nginx/
-docs/
-
-compose.yaml
-README.md
+│
+├── backend/
+│   ├── app.py
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── README.md
+│
+├── frontend/
+│   └── README.md
+│
+├── nginx/
+│   ├── Dockerfile
+│   ├── nginx.conf
+│   └── README.md
+│
+├── docs/
+│   ├── engineering-journal.md
+│   └── README.md
+│
+├── compose.yaml
+├── CHANGELOG.md
+└── README.md
 ```
 
 ---
 
 ## API Endpoints
 
-| Method | Endpoint | Description |
-|---------|----------|-------------|
-| GET | /api/health | Health check |
-| GET | /api/incidents | List all incidents |
-| GET | /api/incidents/<id> | Retrieve one incident |
+| Method | Endpoint            | Description                |
+| ------ | ------------------- | -------------------------- |
+| GET    | /                   | API information            |
+| GET    | /api/health         | Health check               |
+| GET    | /api/incidents      | Retrieve all incidents     |
+| GET    | /api/incidents/<id> | Retrieve a single incident |
 
 ---
 
-## Roadmap
+## Development Roadmap
 
-- [x] Build initial Flask API
-- [ ] Containerize backend
-- [ ] Add Docker Compose
-- [ ] Add Nginx reverse proxy
-- [ ] Add MySQL persistence
-- [ ] Deploy to AWS EC2
-- [ ] Build CI/CD pipeline
-- [ ] Provision infrastructure with Terraform
-- [ ] Deploy to Kubernetes
+* [x] Build Flask REST API
+* [x] Containerize backend with Docker
+* [x] Orchestrate services using Docker Compose
+* [x] Add Nginx reverse proxy
+* [ ] Integrate MySQL database
+* [ ] Add persistent Docker volumes
+* [ ] Deploy to AWS EC2
+* [ ] Implement CI/CD with GitHub Actions
+* [ ] Provision infrastructure using Terraform
+* [ ] Deploy to Kubernetes
 
 ---
 
-This project is part of my journey toward becoming a Cloud & DevOps Engineer.
+## Engineering Principles
+
+Throughout this project, the focus is not only on building software but also on applying professional engineering practices, including:
+
+* Infrastructure as Code
+* Container-first development
+* Incremental architecture evolution
+* Version-controlled documentation
+* Conventional Git commits
+* Production-inspired project structure
+
+---
+
+This repository documents my journey toward becoming a Cloud & DevOps Engineer by building, documenting, and deploying a production-inspired application one sprint at a time.

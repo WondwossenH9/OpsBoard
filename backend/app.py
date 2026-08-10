@@ -37,6 +37,19 @@ INCIDENTS = [
 ]
 
 
+@app.route("/")
+def home():
+    return jsonify(
+        {
+            "message": "Welcome to OpsBoard API",
+            "status": "running",
+            "version": APP_VERSION,
+            "health": "/api/health",
+            "incidents": "/api/incidents",
+        }
+    ), 200
+
+
 @app.route("/api/health", methods=["GET"])
 def health_check():
     """Health check endpoint."""
