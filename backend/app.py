@@ -1,3 +1,6 @@
+import os
+
+import mysql.connector
 from flask import Flask, jsonify
 
 app = Flask(__name__)
@@ -5,36 +8,22 @@ app = Flask(__name__)
 # -------------------------------------------------------------------
 # Application Configuration
 # -------------------------------------------------------------------
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST"),
+    "port": int(os.getenv("DB_PORT", "3306")),
+    "database": os.getenv("DB_NAME"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+}
+
+
+def get_db_connection():
+    return mysql.connector.connect(**DB_CONFIG)
+
 
 APP_NAME = "OpsBoard API"
 APP_VERSION = "1.0.0"
 APP_ENV = "development"
-
-# -------------------------------------------------------------------
-# Temporary in-memory data
-# This will be replaced with MySQL in Sprint 3.
-# -------------------------------------------------------------------
-
-INCIDENTS = [
-    {
-        "id": 1,
-        "title": "Database Connection Timeout",
-        "status": "investigating",
-        "severity": "high",
-    },
-    {
-        "id": 2,
-        "title": "High Memory Usage on API Gateway",
-        "status": "resolved",
-        "severity": "medium",
-    },
-    {
-        "id": 3,
-        "title": "SSL Certificate Expiration Warning",
-        "status": "open",
-        "severity": "low",
-    },
-]
 
 
 @app.route("/")
@@ -69,38 +58,52 @@ def health_check():
 
 @app.route("/api/incidents", methods=["GET"])
 def get_incidents():
-    """Return all incidents."""
+    """Retrieve all incidents from MySQL."""
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
 
-    return (
-        jsonify(
-            {
-                "total": len(INCIDENTS),
-                "incidents": INCIDENTS,
-            }
-        ),
-        200,
-    )
+    cursor.execute("SELECT id, title, status, severity FROM incidents ORDER BY id")
+
+    incidents = cursor.fetchall()
+
+    cursor.close()
+    connection.close()
+
+    return jsonify(
+        {
+            "total": len(incidents),
+            "incidents": incidents,
+        }
+    ), 200
 
 
 @app.route("/api/incidents/<int:incident_id>", methods=["GET"])
 def get_incident(incident_id):
-    """Return a single incident."""
+    """Retrieve a single incident from MySQL."""
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
 
-    incident = next(
-        (item for item in INCIDENTS if item["id"] == incident_id),
-        None,
+    cursor.execute(
+        """
+        SELECT id, title, status, severity
+        FROM incidents
+        WHERE id = %s
+        """,
+        (incident_id,),
     )
 
+    incident = cursor.fetchone()
+
+    cursor.close()
+    connection.close()
+
     if incident is None:
-        return (
-            jsonify(
-                {
-                    "error": "Not Found",
-                    "message": f"Incident with ID {incident_id} was not found.",
-                }
-            ),
-            404,
-        )
+        return jsonify(
+            {
+                "error": "Not Found",
+                "message": f"Incident with ID {incident_id} was not found.",
+            }
+        ), 404
 
     return jsonify(incident), 200
 
