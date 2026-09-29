@@ -4,6 +4,32 @@ All notable changes to OpsBoard are documented in this file.
 
 ---
 
+## v0.5.0 — Operational Robustness
+
+### Added
+
+- Centralized MySQL database exception handling.
+- Safe JSON responses for database failures.
+- Server-side logging for database errors.
+- Database resource management using Python context managers.
+
+### Improved
+
+- Refactored both incident endpoints to use consistent database resource management.
+- Database failures now return HTTP `503 Service Unavailable` instead of exposing internal server errors.
+- Client-facing database error messages no longer expose connector or infrastructure details.
+- Database errors are logged server-side for diagnostics.
+
+### Verified
+
+- Existing incident returns `200 OK`.
+- Missing incident returns `404 Not Found`.
+- Database outage returns `503 Service Unavailable`.
+- API successfully recovers to `200 OK` after MySQL becomes healthy again.
+- `/api/incidents` and `/api/incidents/<id>` both return `503 Service Unavailable` when MySQL is unavailable.
+
+---
+
 ## v0.4.0 — Database Integration & Multi-Service Architecture
 
 ### Added
@@ -25,7 +51,7 @@ All notable changes to OpsBoard are documented in this file.
 - Flask now retrieves incident data from MySQL.
 - Flask connects to MySQL using the Docker Compose service name `mysql`.
 - Database credentials are supplied through environment variables rather than being hardcoded in `compose.yaml`.
-- Backend waits for MySQL to become healthy before starting.
+- Docker Compose waits for MySQL to pass its health check before starting the backend container.
 - Only Nginx is exposed to the host.
 - Backend port `8000` remains internal to the Docker network.
 - MySQL port `3306` remains internal to the Docker network.

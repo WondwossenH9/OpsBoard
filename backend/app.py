@@ -26,6 +26,26 @@ APP_VERSION = "1.0.0"
 APP_ENV = "development"
 
 
+# -------------------------------------------------------------------
+# Error Handlers
+# -------------------------------------------------------------------
+@app.errorhandler(mysql.connector.Error)
+def handle_database_error(error):
+    app.logger.error("Database error: %s", error)
+
+    return jsonify(
+        {
+            "error": "Service Unavailable",
+            "message": "The database is currently unavailable.",
+        }
+    ), 503
+
+
+# -------------------------------------------------------------------
+# Routes
+# -------------------------------------------------------------------
+
+
 @app.route("/")
 def home():
     return jsonify(
@@ -59,15 +79,14 @@ def health_check():
 @app.route("/api/incidents", methods=["GET"])
 def get_incidents():
     """Retrieve all incidents from MySQL."""
-    connection = get_db_connection()
-    cursor = connection.cursor(dictionary=True)
 
-    cursor.execute("SELECT id, title, status, severity FROM incidents ORDER BY id")
+    with get_db_connection() as connection:
+        with connection.cursor(dictionary=True) as cursor:
+            cursor.execute(
+                "SELECT id, title, status, severity FROM incidents ORDER BY id"
+            )
 
-    incidents = cursor.fetchall()
-
-    cursor.close()
-    connection.close()
+            incidents = cursor.fetchall()
 
     return jsonify(
         {
@@ -93,9 +112,6 @@ def get_incident(incident_id):
     )
 
     incident = cursor.fetchone()
-
-    cursor.close()
-    connection.close()
 
     if incident is None:
         return jsonify(
