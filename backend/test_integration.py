@@ -70,6 +70,34 @@ class IncidentIntegrationTestCase(unittest.TestCase):
             ],
         )
 
+    def test_get_existing_incident_from_real_mysql(self):
+        response = self.client.get("/api/incidents/1")
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            data,
+            {
+                "id": 1,
+                "title": "Database outage",
+                "status": "open",
+                "severity": "critical",
+            },
+        )
+
+    def test_get_missing_incident_returns_404(self):
+        response = self.client.get("/api/incidents/999")
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(
+            data,
+            {
+                "error": "Not Found",
+                "message": "Incident with ID 999 was not found.",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
