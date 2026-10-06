@@ -99,19 +99,18 @@ def get_incidents():
 @app.route("/api/incidents/<int:incident_id>", methods=["GET"])
 def get_incident(incident_id):
     """Retrieve a single incident from MySQL."""
-    connection = get_db_connection()
-    cursor = connection.cursor(dictionary=True)
+    with get_db_connection() as connection:
+        with connection.cursor(dictionary=True) as cursor:
+            cursor.execute(
+                """
+                SELECT id, title, status, severity
+                FROM incidents
+                WHERE id = %s
+                """,
+                (incident_id,),
+            )
 
-    cursor.execute(
-        """
-        SELECT id, title, status, severity
-        FROM incidents
-        WHERE id = %s
-        """,
-        (incident_id,),
-    )
-
-    incident = cursor.fetchone()
+            incident = cursor.fetchone()
 
     if incident is None:
         return jsonify(
