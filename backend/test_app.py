@@ -79,6 +79,24 @@ class IncidentTestCase(unittest.TestCase):
             "The database is currently unavailable.",
         )
 
+    @patch("app.get_db_connection")
+    def test_get_incident_returns_503_when_database_unavailable(
+        self, mock_get_db_connection
+    ):
+        mock_get_db_connection.side_effect = mysql.connector.Error(
+            "Database unavailable"
+        )
+
+        response = self.client.get("/api/incidents/1")
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(data["error"], "Service Unavailable")
+        self.assertEqual(
+            data["message"],
+            "The database is currently unavailable.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
