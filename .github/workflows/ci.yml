@@ -78,3 +78,16 @@ jobs:
         run: |
           cd backend
           python -m unittest test_integration.py -v
+
+  publish-image:
+    needs:
+      - backend-ci
+      - integration-tests
+
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Confirm release gate
+        run: echo "All required CI checks passed on main. Image publishing may proceed."
