@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS incidents (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    status VARCHAR(50) NOT NULL,
+    severity VARCHAR(50) NOT NULL
+);
