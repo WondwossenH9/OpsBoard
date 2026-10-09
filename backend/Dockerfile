@@ -28,4 +28,4 @@ EXPOSE 8000
 # --------------------------------------------------
 # Start Application
 # --------------------------------------------------
-CMD ["python", "app.py"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "--access-logfile", "-", "--error-logfile", "-", "app:app"]
