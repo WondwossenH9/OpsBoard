@@ -3,7 +3,118 @@
 All notable changes to OpsBoard are documented in this file.
 
 ---
+## v0.6.0 — CI/CD & Release Engineering
 
+### Added
+
+- GitHub Actions CI for pushes and pull requests targeting `main`.
+- Python syntax validation using `compileall`.
+- Automated backend unit tests.
+- Real MySQL 8.0 integration testing in GitHub Actions.
+- Docker image build validation in CI.
+- Protected `main` branch with required CI status checks.
+- Gated backend image publishing to GitHub Container Registry.
+- Git commit SHA and `latest` image tags.
+- Release-specific Docker Compose configuration using published GHCR artifacts.
+- Version-controlled database migration for the `incidents` table.
+- One-shot database migration service with dependency gating.
+- Gunicorn production WSGI server with two workers.
+
+### Improved
+
+- Pull requests are validated before merge without publishing release artifacts.
+- Backend container images are published only after required checks pass on `main`.
+- Release environments consume tested container artifacts instead of rebuilding backend source.
+- MySQL readiness checks now verify TCP connectivity required by dependent containers.
+- Backend startup waits for successful database migration.
+- Backend container runtime changed from Flask's development server to Gunicorn.
+- Gunicorn access and error logs are written to container stdout/stderr.
+- Single-incident database access now uses consistent context-managed resource handling.
+
+### Testing
+
+- Added 5 backend unit tests covering:
+  - Health endpoint availability.
+  - Health response contract.
+  - Incident collection retrieval with a mocked database.
+  - Collection endpoint database failure handling.
+  - Single-incident database failure handling.
+- Added 3 integration tests using real MySQL covering:
+  - Incident collection retrieval.
+  - Existing incident retrieval.
+  - Missing incident `404` behavior.
+- Deliberately introduced and corrected a CI syntax failure to verify pipeline failure behavior.
+- Verified database-failure `503` behavior under Gunicorn.
+- Verified the published GHCR image could be pulled and executed outside the CI runner.
+
+### Release Engineering
+
+- Established the release flow:
+
+```text
+Feature Branch
+    ↓
+Pull Request
+    ↓
+backend-ci + integration-tests
+    ↓
+Protected main
+    ↓
+Release gate
+    ↓
+Build backend image
+    ↓
+Publish to GHCR
+    ↓
+SHA-tagged release artifact
+```
+
+- Verified a published backend image using its Git commit SHA tag.
+- Verified runtime configuration without rebuilding the container image.
+- Added an isolated `opsboard-release` Compose environment.
+- Verified fresh-environment deployment using a new MySQL volume.
+- Verified database migration completes before backend startup.
+- Verified the final release stack through Nginx:
+
+```text
+GET /api/health    → 200 OK
+GET /api/incidents → 200 OK
+```
+
+### Operational Hardening
+
+- Replaced Flask's development server with Gunicorn.
+- Verified two Gunicorn workers start successfully.
+- Removed Flask debugger/reloader behavior from the release runtime.
+- Preserved centralized `503 Service Unavailable` handling under Gunicorn.
+- Improved MySQL health checks to validate TCP readiness.
+
+### Lessons
+
+- CI should be tested in both failure and success states.
+- Required status checks turn CI from advisory feedback into an enforcement mechanism.
+- Unit tests and integration tests validate different layers of the system.
+- Release artifacts should be traceable to source commits.
+- Deployment environments should consume tested artifacts rather than rebuild source.
+- Database schema must be version-controlled and reproducible.
+- Migration jobs should block application startup when schema preparation fails.
+- Health checks should validate the capability required by dependent services.
+- Production containers should run production application servers rather than development servers.
+
+### Verified
+
+- Pull-request CI blocks unsafe changes from reaching `main`.
+- Release image publication occurs only after both CI jobs succeed.
+- SHA-tagged backend images can be pulled successfully from GHCR.
+- The same published artifact works with runtime-supplied configuration.
+- Fresh release environments create the required database schema automatically.
+- Migration failure prevents backend startup.
+- Successful migration exits with code `0`.
+- Gunicorn serves the Flask application on port `8000`.
+- Nginx successfully proxies requests to the Gunicorn backend.
+- Fresh release deployment returns `200 OK` for both health and incident endpoints.
+
+---
 ## v0.5.0 — Operational Robustness
 
 ### Added
