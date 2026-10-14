@@ -23,90 +23,209 @@ The goal is to understand and demonstrate how an application is:
 
 ## Current Status
 
-**Sprint 7 — CI/CD & Release Engineering**
+**Sprint 8 — AWS Deployment & Observability**
 
-OpsBoard now supports an automated delivery flow from feature branch to a versioned container artifact.
+OpsBoard has progressed from a locally reproducible container release into a working AWS deployment with network isolation, load balancing, managed database infrastructure, native AWS observability, and alerting.
 
-The current platform includes:
+The deployed platform now includes:
 
-- **Nginx** — public reverse proxy
+- **Application Load Balancer** — public HTTP entry point and target health checking
+- **EC2** — Docker application host
+- **Nginx** — reverse proxy running on EC2
 - **Gunicorn** — production WSGI server
 - **Flask** — backend REST API
-- **MySQL 8.0** — persistent database
-- **Docker Compose** — local multi-service orchestration
-- **GitHub Actions** — CI and release automation
-- **GitHub Container Registry (GHCR)** — backend container registry
-- **SQL migration job** — reproducible database schema bootstrap
-- **Protected `main` branch** — enforced CI before merge
+- **Amazon RDS MySQL 8.0** — private managed database
+- **AWS Systems Manager Session Manager** — administrative access without inbound SSH
+- **CloudWatch** — infrastructure metrics and alarms
+- **Amazon SNS** — email notification delivery
+- **GitHub Container Registry** — immutable backend deployment artifact
+- **GitHub Actions** — CI and image publication pipeline
 
-The project currently demonstrates both:
+The release artifact deployed to AWS is the same SHA-tagged backend image produced by the Sprint 7 CI/CD pipeline.
 
-```text
-Development workflow
-```
-
-and:
+OpsBoard now demonstrates:
 
 ```text
-Release workflow
+Source change
+    ↓
+Automated validation
+    ↓
+Versioned container artifact
+    ↓
+AWS deployment
+    ↓
+Health monitoring
+    ↓
+Failure detection
+    ↓
+Alerting
+    ↓
+Diagnosis
+    ↓
+Recovery
 ```
 
-The next major phase is AWS deployment.
+Detailed Sprint 8 architecture, failure testing, CloudWatch observations, and operational lessons are documented in:
+
+```text
+docs/aws-deployment.md
+```
+
+The next major phase is reproducing the manually created AWS infrastructure with Terraform.
 
 ---
 
 ## Current Architecture
 
 ```text
-                         Client
-                           |
-                           | HTTP :80
-                           v
-                  +------------------+
-                  |      Nginx       |
-                  |  Reverse Proxy   |
-                  +---------+--------+
+                         Internet
                             |
-                            | backend:8000
+                            | HTTP :80
                             v
-                  +------------------+
-                  |     Gunicorn     |
-                  |   WSGI Server    |
-                  +---------+--------+
+                 +----------------------+
+                 | Application Load     |
+                 | Balancer             |
+                 | Public Subnets A/B   |
+                 +----------+-----------+
                             |
+                            | TCP :80
                             v
-                  +------------------+
-                  |      Flask       |
-                  |     REST API     |
-                  +---------+--------+
+                 +----------------------+
+                 | EC2 t3.micro         |
+                 | Public Subnet A      |
+                 |                      |
+                 | Nginx :80            |
+                 |     |                |
+                 |     v                |
+                 | Gunicorn :8000       |
+                 |     |                |
+                 |     v                |
+                 | Flask REST API       |
+                 +----------+-----------+
                             |
-                            | mysql:3306
+                            | TCP :3306
                             v
-                  +------------------+
-                  |      MySQL       |
-                  |     Database     |
-                  +---------+--------+
-                            |
-                            v
-                  +------------------+
-                  |   mysql_data     |
-                  |  Named Volume    |
-                  +------------------+
+                 +----------------------+
+                 | Amazon RDS MySQL     |
+                 | db.t4g.micro         |
+                 | Private DB Subnets   |
+                 | Public access: No    |
+                 +----------------------+
 ```
 
-Database initialization in the release environment adds an additional startup stage:
+Administration uses:
 
 ```text
-MySQL healthy
-     ↓
-migration job
-     ↓
-migration exits successfully
-     ↓
-Gunicorn backend starts
-     ↓
-Nginx starts
+Ubuntu workstation
+        ↓
+AWS CLI
+        ↓
+Systems Manager Session Manager
+        ↓
+EC2
 ```
+
+No inbound SSH port is required.
+
+The application security path is:
+
+```text
+Internet
+    ↓ TCP 80
+ALB Security Group
+    ↓ TCP 80
+EC2 Security Group
+    ↓ TCP 3306
+RDS Security Group
+```
+
+Direct HTTP access to the EC2 public IP was deliberately tested and blocked.
+
+Only traffic arriving through the Application Load Balancer can reach Nginx on EC2.
+
+---
+
+## AWS Observability
+
+OpsBoard uses native AWS telemetry across each infrastructure tier.
+
+### Application Load Balancer
+
+Observed metrics include:
+
+```text
+HealthyHostCount
+UnHealthyHostCount
+RequestCount
+HTTPCode_Target_2XX_Count
+HTTPCode_Target_4XX_Count
+HTTPCode_ELB_502_Count
+HTTPCode_ELB_503_Count
+TargetConnectionErrorCount
+TargetResponseTime
+```
+
+### EC2
+
+Observed metrics include:
+
+```text
+CPUUtilization
+CPUCreditBalance
+StatusCheckFailed_Instance
+StatusCheckFailed_System
+```
+
+### RDS
+
+Observed metrics include:
+
+```text
+DatabaseConnections
+CPUUtilization
+FreeableMemory
+FreeStorageSpace
+CPUCreditBalance
+CPUSurplusCreditBalance
+CPUSurplusCreditsCharged
+SwapUsage
+```
+
+CloudWatch alarms currently monitor:
+
+```text
+ALB unhealthy target
+EC2 status-check failure
+RDS low free storage
+```
+
+The ALB availability alarm publishes state changes through Amazon SNS to an email subscriber.
+
+The complete path has been deliberately tested:
+
+```text
+Nginx failure
+    ↓
+ALB target unhealthy
+    ↓
+CloudWatch metric breach
+    ↓
+CloudWatch ALARM
+    ↓
+SNS notification
+    ↓
+operator diagnosis
+    ↓
+Nginx recovery
+    ↓
+ALB target healthy
+    ↓
+CloudWatch OK
+    ↓
+SNS recovery action
+```
+
+This verifies not only deployment availability, but also detection and recovery behavior.
 
 ---
 
@@ -733,6 +852,7 @@ opsboard/
 ├── frontend/
 │
 ├── docs/
+|   ├── aws-deployment.md
 │   └── engineering-journal.md
 │
 ├── .env.example
@@ -786,6 +906,23 @@ opsboard/
 - Immutable-artifact workflow
 - Production WSGI serving
 - Failure-path verification
+
+### AWS Infrastructure and Operations
+
+- Amazon VPC
+- Public and private subnets
+- Internet Gateway
+- Route tables
+- Security Groups
+- Amazon EC2
+- AWS Systems Manager Session Manager
+- Amazon RDS for MySQL
+- Application Load Balancer
+- Target groups and health checks
+- Amazon CloudWatch metrics
+- CloudWatch alarms
+- Amazon SNS notifications
+- AWS Budgets
 
 ---
 
@@ -843,19 +980,28 @@ The engineering journal documents those failures, decisions, and lessons in deta
 - Release Compose environment
 - Version-controlled database migration
 - Gunicorn production runtime
+- AWS VPC and subnet architecture
+- Security-group tier isolation
+- EC2 container deployment
+- Systems Manager administration
+- Private Amazon RDS MySQL deployment
+- Application Load Balancer
+- ALB target health checks
+- CloudWatch infrastructure monitoring
+- Controlled AWS failure and recovery testing
+- CloudWatch alarms
+- Amazon SNS email notifications
+- AWS cost monitoring and budget controls
 
 ### Next
 
 ```text
-AWS Deployment
-      ↓
 Terraform Infrastructure as Code
+      ↓
+Reproducible AWS environment
       ↓
 Kubernetes
       ↓
-Observability
+Centralized application logging
       ↓
-Final production hardening
-```
-
-The next major milestone is deploying the existing release architecture to AWS while preserving the delivery principles already established locally.
+HTTPS and production hardening
