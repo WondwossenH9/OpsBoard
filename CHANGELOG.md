@@ -2,6 +2,226 @@
 
 All notable changes to OpsBoard are documented in this file.
 
+## v0.7.0 — AWS Deployment & Observability
+
+### Added
+
+- Dedicated AWS VPC using `10.0.0.0/16`.
+- Two public subnets across separate Availability Zones.
+- Two private database subnets across separate Availability Zones.
+- Internet Gateway and public route table.
+- Dedicated private database route table with no Internet default route.
+- Security groups separating ALB, EC2, and RDS traffic.
+- EC2 `t3.micro` Docker application host.
+- AWS Systems Manager Session Manager administration without inbound SSH.
+- Private Amazon RDS MySQL 8.0 database.
+- RDS subnet group spanning two Availability Zones.
+- Internet-facing Application Load Balancer.
+- ALB target group using `/api/health`.
+- Native CloudWatch monitoring for ALB, EC2, and RDS.
+- CloudWatch alarms for:
+  - unhealthy ALB targets;
+  - EC2 status-check failures;
+  - low RDS free storage.
+- Amazon SNS email notification topic for application availability alarms.
+- AWS Budget for cost monitoring.
+- Detailed AWS deployment documentation in `docs/aws-deployment.md`.
+
+### Deployment
+
+- Deployed the existing SHA-tagged backend image from GitHub Container Registry rather than rebuilding application source on EC2.
+- Preserved the Sprint 7 immutable-artifact principle:
+
+```text
+Build once
+    ↓
+publish artifact
+    ↓
+configure at runtime
+    ↓
+deploy the same artifact
+```
+
+- Ran Nginx and the Gunicorn backend as Docker containers on EC2.
+- Published Gunicorn only on the EC2 loopback interface.
+- Exposed public HTTP traffic through Nginx on port `80`.
+- Applied the existing version-controlled SQL migration to Amazon RDS.
+- Verified RDS DNS resolution, TCP connectivity, authentication, database existence, schema creation, and application queries independently.
+- Verified public application access through the ALB:
+
+```text
+GET /api/health    → 200 OK
+GET /api/incidents → 200 OK
+```
+
+### Security
+
+- Allowed public HTTP traffic only to the Application Load Balancer.
+- Restricted EC2 HTTP ingress to the ALB security group.
+- Restricted RDS MySQL ingress to the EC2 security group.
+- Kept RDS publicly inaccessible.
+- Did not expose Gunicorn port `8000` publicly.
+- Did not open inbound SSH port `22`.
+- Used Systems Manager Session Manager for EC2 administration.
+- Verified that direct HTTP access to the EC2 public IPv4 address timed out while ALB traffic continued to succeed.
+- Kept runtime database credentials outside the Git repository.
+
+### Observability
+
+- Observed ALB metrics including:
+  - `HealthyHostCount`
+  - `UnHealthyHostCount`
+  - `RequestCount`
+  - target HTTP status counts
+  - ALB `502` and `503` counts
+  - `TargetConnectionErrorCount`
+  - `TargetResponseTime`
+- Observed EC2:
+  - `CPUUtilization`
+  - `CPUCreditBalance`
+  - instance status checks
+  - system status checks
+- Observed RDS:
+  - `DatabaseConnections`
+  - `CPUUtilization`
+  - `FreeableMemory`
+  - `FreeStorageSpace`
+  - CPU credit metrics
+  - surplus-credit metrics
+  - `SwapUsage`
+- Verified that a deliberately long-lived MySQL connection became visible through the RDS `DatabaseConnections` metric.
+- Verified that CPU credits rebuilt after the RDS instance restarted.
+- Verified that temporary RDS surplus CPU credits were repaid with `CPUSurplusCreditsCharged = 0`.
+
+### Failure Testing
+
+- Deliberately stopped the Nginx container while leaving the backend and database running.
+- Verified the ALB target became unhealthy.
+- Correlated the failure with:
+
+```text
+TargetConnectionErrorCount ↑
+HTTPCode_ELB_502_Count      ↑
+```
+
+- Verified that a longer period without a usable backend produced ALB-generated HTTP `503` responses.
+- Restarted only the failed Nginx layer rather than restarting the complete stack.
+- Verified recovery progressively:
+
+```text
+Nginx running
+    ↓
+EC2-local /api/health → 200
+    ↓
+ALB target → healthy
+    ↓
+public API → 200
+```
+
+### Alerting
+
+- Created the `opsboard-alb-unhealthy-target` CloudWatch alarm.
+- Configured two consecutive one-minute unhealthy datapoints before entering `ALARM`.
+- Deliberately triggered the alarm by stopping Nginx.
+- Verified the alarm transitioned:
+
+```text
+OK
+→ ALARM
+→ OK
+```
+
+- Created an SNS topic for OpsBoard alerts.
+- Confirmed the email subscription.
+- Verified SNS independently with a test notification.
+- Configured both CloudWatch `ALARM` and `OK` actions.
+- Verified CloudWatch alarm history recorded successful SNS actions for both failure and recovery.
+- Verified SNS metrics showed successful notification delivery and zero notification failures.
+
+### Cost Management
+
+- Created a monthly AWS Budget.
+- Avoided a NAT Gateway for the learning deployment.
+- Used small burstable EC2 and RDS instance classes.
+- Used Single-AZ RDS for the lab environment.
+- Used native AWS metrics before introducing additional monitoring agents.
+- Monitored CPU-credit behavior for both cost and performance awareness.
+- Established a lab operating pattern of stopping or deleting billable infrastructure when it is not required.
+- Identified the Application Load Balancer as a resource that must be deleted, rather than stopped, to end its hourly charges.
+
+### Lessons
+
+- A public subnet and public IPv4 address do not automatically make a service reachable; routing and security rules both matter.
+- Security-group references provide stronger tier isolation than broad VPC CIDR rules.
+- Infrastructure should be diagnosed layer by layer rather than by changing security rules at random.
+- Database networking, authentication, schema state, and application queries are separate failure domains.
+- An ALB `502` and an ALB `503` represent different failure conditions.
+- Application failure can occur while EC2 infrastructure status checks remain healthy.
+- Monitoring data can lag behind the event being observed.
+- Metrics, health checks, logs, and alarms answer different operational questions.
+- An alarm configuration should be deliberately triggered and recovered rather than assumed to work.
+- Notification delivery should be verified independently from alarm state.
+- Internet-facing infrastructure receives unsolicited traffic even when its endpoint has not been intentionally advertised.
+- Cost is an operational concern and should be monitored alongside reliability and performance.
+- Manual infrastructure understanding should precede Infrastructure as Code when the learning objective is to understand the underlying AWS resources.
+
+### Verified
+
+- EC2 application host reachable through Systems Manager.
+- No inbound SSH access required.
+- RDS inaccessible directly from the Internet.
+- EC2 direct public HTTP blocked.
+- ALB public HTTP path returns `200 OK`.
+- Nginx successfully proxies to Gunicorn.
+- Gunicorn successfully serves Flask.
+- Flask successfully queries private RDS MySQL.
+- ALB health checks detect application-layer failures.
+- CloudWatch captures unhealthy-target transitions.
+- CloudWatch distinguishes connection-related `502` failures from no-healthy-target `503` failures.
+- EC2 infrastructure status checks remain healthy during an application-only Nginx failure.
+- CloudWatch alarm transitions correctly between `OK` and `ALARM`.
+- SNS successfully receives CloudWatch alarm actions.
+- SNS notification delivery succeeds with zero reported failures.
+- Application recovery returns the ALB target and CloudWatch alarm to healthy state.
+
+### Sprint Outcome
+
+OpsBoard progressed from a CI-controlled container release into an AWS-hosted, monitored, and alerting application platform.
+
+The deployed path is now:
+
+```text
+Internet
+    ↓
+Application Load Balancer
+    ↓
+EC2
+    ↓
+Nginx
+    ↓
+Gunicorn
+    ↓
+Flask
+    ↓
+Amazon RDS MySQL
+```
+
+with operations supported by:
+
+```text
+CloudWatch metrics
+    ↓
+CloudWatch alarms
+    ↓
+Amazon SNS
+    ↓
+email notification
+```
+
+Sprint 8 establishes the manually understood architecture that Sprint 9 will reproduce using Terraform.
+
+---
+
 ---
 ## v0.6.0 — CI/CD & Release Engineering
 

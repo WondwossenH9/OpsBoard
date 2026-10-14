@@ -1484,3 +1484,1209 @@ Kubernetes orchestration
         ↓
 observability and final production hardening
 ```
+
+## Sprint 8 — AWS Deployment, Observability & Alerting
+
+### Objective
+
+Deploy the existing OpsBoard release artifact to AWS, understand the infrastructure manually before introducing Terraform, verify security boundaries, observe failure behavior, and build an operational monitoring and alerting loop.
+
+The sprint followed this progression:
+
+```text
+VPC
+  ↓
+subnets
+  ↓
+routing
+  ↓
+security groups
+  ↓
+RDS
+  ↓
+EC2
+  ↓
+Docker runtime
+  ↓
+Application Load Balancer
+  ↓
+CloudWatch metrics
+  ↓
+CloudWatch alarms
+  ↓
+SNS notifications
+```
+
+The goal was not only to make OpsBoard reachable from the Internet.
+
+The goal was to understand how each infrastructure layer behaves, how failures propagate, and how AWS telemetry can be used to diagnose them.
+
+---
+
+### Manual Infrastructure Before Terraform
+
+Sprint 8 deliberately used manually created AWS resources.
+
+Terraform was postponed until the next sprint so the underlying AWS concepts could be understood first.
+
+The learning sequence was:
+
+```text
+understand the resource
+        ↓
+create it manually
+        ↓
+verify behavior
+        ↓
+break it deliberately
+        ↓
+observe failure
+        ↓
+recover it
+        ↓
+document the lesson
+        ↓
+encode it later with Terraform
+```
+
+This avoids treating Infrastructure as Code as a way to automate architecture that is not yet understood.
+
+---
+
+### AWS CLI Authentication
+
+The local AWS CLI originally contained stale static credentials.
+
+The old credentials file was preserved as a backup and removed from active use.
+
+Authentication was moved to the newer browser-based AWS CLI login flow using the IAM administrator identity.
+
+The CLI was upgraded to a current AWS CLI v2 release before continuing.
+
+This reinforced the principle:
+
+> Authentication problems should be resolved before infrastructure troubleshooting begins.
+
+---
+
+### Cost Controls
+
+The AWS account was treated as a metered engineering lab.
+
+A monthly AWS Budget was configured.
+
+The deployment was designed to avoid unnecessary recurring charges.
+
+Choices included:
+
+```text
+no NAT Gateway
+t3.micro EC2
+db.t4g.micro RDS
+Single-AZ database
+small gp3 volumes
+native CloudWatch metrics
+```
+
+EC2 and RDS were stopped during periods when the lab was not being used.
+
+A key lesson was that an Application Load Balancer cannot be stopped.
+
+To stop its hourly charges, it must be deleted.
+
+This made cost management part of normal operational thinking rather than a separate billing exercise.
+
+---
+
+### VPC Architecture
+
+A dedicated VPC was created:
+
+```text
+10.0.0.0/16
+```
+
+Four subnets were created across two Availability Zones:
+
+```text
+Public A      10.0.1.0/24
+Public B      10.0.2.0/24
+
+DB Private A  10.0.11.0/24
+DB Private B  10.0.12.0/24
+```
+
+An Internet Gateway was attached to the VPC.
+
+The public route table contains:
+
+```text
+0.0.0.0/0
+→ Internet Gateway
+```
+
+The private database route table contains only the VPC-local route.
+
+This established the distinction:
+
+```text
+Public subnet
+→ route to an Internet Gateway
+
+Private subnet
+→ no direct Internet default route
+```
+
+It also reinforced that subnet type is determined by routing behavior rather than by the subnet name.
+
+---
+
+### Route Tables vs. Security Groups
+
+An important networking distinction was reinforced during the sprint.
+
+```text
+Route table
+→ where can the packet go?
+
+Security group
+→ is the packet allowed?
+```
+
+A valid route does not imply that traffic is permitted.
+
+A permissive security group does not create a missing route.
+
+Troubleshooting therefore needs to consider both layers independently.
+
+---
+
+### Security-Group Design
+
+Three security groups were created.
+
+The intended trust path is:
+
+```text
+Internet
+    ↓
+ALB Security Group
+    ↓
+EC2 Security Group
+    ↓
+RDS Security Group
+```
+
+The ALB allows:
+
+```text
+TCP 80
+source: Internet
+```
+
+The EC2 application host allows:
+
+```text
+TCP 80
+source: ALB security group
+```
+
+The RDS database allows:
+
+```text
+TCP 3306
+source: EC2 security group
+```
+
+Security-group references were preferred over broad CIDR rules.
+
+This means the database trusts the application tier rather than every resource inside the VPC.
+
+---
+
+### RDS Deployment
+
+Amazon RDS MySQL was deployed using:
+
+```text
+MySQL 8.0
+db.t4g.micro
+Single-AZ
+20 GiB gp3
+encrypted storage
+publicly accessible: false
+```
+
+The database subnet group spans the two private database subnets.
+
+The database name is:
+
+```text
+mydatabase
+```
+
+The RDS endpoint remained private and was accessed only from the application tier.
+
+---
+
+### Progressive Database Connectivity Testing
+
+Database connectivity was tested layer by layer instead of jumping directly to the Flask application.
+
+The sequence was:
+
+```text
+DNS resolution
+    ↓
+TCP 3306
+    ↓
+MySQL authentication
+    ↓
+database existence
+    ↓
+schema existence
+    ↓
+application query
+```
+
+The EC2 host successfully resolved the RDS endpoint.
+
+TCP connectivity to port `3306` succeeded.
+
+A temporary MySQL Docker client authenticated successfully.
+
+The MySQL server version was verified.
+
+The application database existed.
+
+Initially, the database contained no application table.
+
+This isolated connectivity from schema state.
+
+---
+
+### Migration Troubleshooting
+
+The existing Sprint 7 SQL migration was applied to RDS.
+
+The first migration attempt failed with:
+
+```text
+using password: NO
+```
+
+This was initially a useful diagnostic clue.
+
+The error did not indicate:
+
+```text
+wrong security group
+wrong route table
+wrong RDS endpoint
+```
+
+It indicated that the client process had not actually received a password.
+
+The environment variable was corrected and the migration succeeded.
+
+Afterward:
+
+```text
+SHOW TABLES
+→ incidents
+```
+
+The schema structure was verified and the initial row count was zero.
+
+This reinforced:
+
+> Authentication errors should not automatically be treated as networking errors.
+
+---
+
+### EC2 Application Host
+
+An EC2 `t3.micro` instance was launched in the public application subnet.
+
+Ubuntu Server 24.04 LTS x86_64 was selected.
+
+The x86_64 architecture was chosen because the existing GitHub Container Registry image had been built on an x86_64 GitHub-hosted runner.
+
+Using an ARM instance without a multi-architecture container image could have introduced an image architecture mismatch.
+
+The EC2 instance uses:
+
+```text
+8 GiB encrypted gp3
+IMDSv2 required
+T3 CPU credits: standard
+```
+
+No SSH key was required.
+
+Administration uses AWS Systems Manager Session Manager.
+
+---
+
+### Systems Manager Administration
+
+An IAM role and instance profile were created for EC2.
+
+The role includes:
+
+```text
+AmazonSSMManagedInstanceCore
+```
+
+The EC2 instance successfully registered with Systems Manager.
+
+The local Session Manager plugin was installed on Ubuntu.
+
+Administrative access then used:
+
+```text
+aws ssm start-session
+```
+
+No inbound port `22` was opened.
+
+This established the operating model:
+
+```text
+Provisioning plane
+Ubuntu workstation + AWS CLI
+
+Runtime plane
+EC2 + Docker + application
+```
+
+The AWS CLI was not required inside EC2.
+
+---
+
+### Docker Runtime on EC2
+
+Docker and Docker Compose were installed on EC2.
+
+A dedicated Docker bridge network was created for OpsBoard.
+
+The backend container was deployed using the exact Sprint 7 Git-SHA-tagged GHCR image.
+
+This preserved the release principle:
+
+```text
+build once
+    ↓
+publish
+    ↓
+deploy the same artifact
+```
+
+The backend was started with:
+
+```text
+--restart unless-stopped
+```
+
+and published only to:
+
+```text
+127.0.0.1:8000
+```
+
+The backend therefore remained inaccessible directly from the Internet.
+
+Runtime database configuration was stored in:
+
+```text
+/etc/opsboard/backend.env
+```
+
+with restrictive root-only permissions.
+
+No secret was committed to Git.
+
+---
+
+### Nginx Deployment
+
+The Nginx image was rebuilt on EC2 using the Sprint 7 configuration.
+
+Nginx joined the same Docker network as the backend.
+
+The backend container had the network alias:
+
+```text
+backend
+```
+
+which allowed Nginx to proxy to:
+
+```text
+backend:8000
+```
+
+Nginx exposed host port `80`.
+
+Local EC2 verification returned:
+
+```text
+GET /api/health
+→ 200 OK
+
+GET /api/incidents
+→ 200 OK
+```
+
+The local application path was therefore:
+
+```text
+Nginx
+    ↓
+Docker DNS
+    ↓
+Gunicorn
+    ↓
+Flask
+    ↓
+RDS MySQL
+```
+
+---
+
+### Application Load Balancer
+
+An Internet-facing Application Load Balancer was created across the two public subnets.
+
+The listener uses:
+
+```text
+HTTP :80
+```
+
+and forwards traffic to a target group on:
+
+```text
+EC2 :80
+```
+
+The health check path is:
+
+```text
+/api/health
+```
+
+The EC2 instance was registered as the target.
+
+The target transitioned from:
+
+```text
+initial
+```
+
+to:
+
+```text
+healthy
+```
+
+after successful health checks.
+
+Public requests then succeeded:
+
+```text
+GET /api/health
+→ 200 OK
+
+GET /api/incidents
+→ 200 OK
+```
+
+---
+
+### Security-Boundary Test
+
+The EC2 instance had a public IPv4 address.
+
+A deliberate test attempted to bypass the ALB and connect directly:
+
+```text
+http://EC2_PUBLIC_IP/api/health
+```
+
+The request timed out.
+
+At the same time:
+
+```text
+http://ALB_DNS/api/health
+```
+
+returned:
+
+```text
+200 OK
+```
+
+This proved:
+
+```text
+Internet → EC2 directly
+→ blocked
+
+Internet → ALB → EC2
+→ allowed
+```
+
+The EC2 public IP alone did not bypass the security-group trust model.
+
+---
+
+### Deliberate Nginx Failure
+
+Nginx was intentionally stopped while:
+
+```text
+backend remained running
+RDS remained available
+```
+
+This isolated the reverse-proxy layer.
+
+The ALB eventually marked the target:
+
+```text
+unhealthy
+```
+
+with:
+
+```text
+Target.FailedHealthChecks
+```
+
+CloudWatch showed:
+
+```text
+HealthyHostCount
+→ decreased
+
+UnHealthyHostCount
+→ increased
+```
+
+During the failure:
+
+```text
+TargetConnectionErrorCount
+→ increased
+```
+
+and the ALB produced:
+
+```text
+HTTP 502
+```
+
+This provided a clear failure chain:
+
+```text
+ALB selects target
+    ↓
+connection to Nginx fails
+    ↓
+TargetConnectionErrorCount
+    ↓
+ALB 502
+```
+
+---
+
+### Longer Backend Unavailability
+
+The infrastructure was later left without a usable backend for a longer period.
+
+The public ALB continued receiving traffic.
+
+CloudWatch recorded repeated:
+
+```text
+HTTPCode_ELB_503_Count
+```
+
+events.
+
+Some five-minute periods contained large request bursts.
+
+These were not ALB health checks because health-check traffic is not counted in the normal HTTP response metrics.
+
+The traffic demonstrated that a public Internet endpoint can receive unsolicited automated requests even when the DNS name has not been deliberately advertised.
+
+The exact request sources were not determined because ALB access logging was outside the scope of this sprint.
+
+---
+
+### 502 vs. 503
+
+Sprint 8 provided a practical distinction between two ALB failure modes.
+
+```text
+502
+→ ALB selected the target
+→ communication with the backend failed
+```
+
+```text
+503
+→ ALB had no usable target available
+```
+
+The distinction was observed through real CloudWatch metrics rather than only studied theoretically.
+
+---
+
+### CloudWatch ALB Observability
+
+ALB metrics examined included:
+
+```text
+HealthyHostCount
+UnHealthyHostCount
+RequestCount
+HTTPCode_Target_2XX_Count
+HTTPCode_Target_4XX_Count
+HTTPCode_Target_5XX_Count
+HTTPCode_ELB_502_Count
+HTTPCode_ELB_503_Count
+TargetConnectionErrorCount
+TargetResponseTime
+```
+
+The historical data clearly captured the deliberate failure and recovery.
+
+This demonstrated the distinction between:
+
+```text
+Health checks
+→ Is the target usable now?
+
+Metrics
+→ How did behavior change over time?
+
+Logs
+→ What happened inside the application?
+```
+
+---
+
+### RDS Observability
+
+RDS metrics examined included:
+
+```text
+DatabaseConnections
+CPUUtilization
+FreeableMemory
+FreeStorageSpace
+CPUCreditBalance
+CPUSurplusCreditBalance
+CPUSurplusCreditsCharged
+SwapUsage
+```
+
+The database showed low steady-state CPU usage.
+
+Free storage remained high.
+
+Freeable memory was relatively small but stable.
+
+Swap usage remained negligible.
+
+---
+
+### Database Connection Metric Experiment
+
+Initially:
+
+```text
+DatabaseConnections = 0
+```
+
+even though application database requests were known to work.
+
+A deliberately long-lived MySQL session was created.
+
+A later CloudWatch query showed:
+
+```text
+DatabaseConnections = 1
+```
+
+during the connection period.
+
+This demonstrated that metric publication timing matters.
+
+A recently occurring event may not be immediately visible through CloudWatch.
+
+The correct operational response is to verify the underlying system before assuming the monitoring platform is wrong.
+
+---
+
+### RDS CPU Credit Behavior
+
+After the RDS instance restarted:
+
+```text
+CPUCreditBalance
+→ initially 0
+```
+
+A small:
+
+```text
+CPUSurplusCreditBalance
+```
+
+was observed during startup.
+
+As CPU utilization settled, the normal credit balance increased and the surplus balance returned to zero.
+
+Most importantly:
+
+```text
+CPUSurplusCreditsCharged = 0
+```
+
+throughout the observation window.
+
+The temporary surplus credits were repaid rather than becoming billable surplus usage.
+
+This connected performance telemetry directly to cost awareness.
+
+---
+
+### EC2 Observability
+
+EC2 metrics examined included:
+
+```text
+CPUUtilization
+CPUCreditBalance
+StatusCheckFailed_Instance
+StatusCheckFailed_System
+```
+
+CPU utilization remained extremely low under the current workload.
+
+The CPU credit balance steadily increased.
+
+Both status-check metrics remained:
+
+```text
+0
+```
+
+throughout the observation window.
+
+This created an important diagnostic distinction.
+
+During the Nginx failure:
+
+```text
+application health
+→ failed
+
+EC2 infrastructure health
+→ remained healthy
+```
+
+Therefore:
+
+```text
+ALB unhealthy + EC2 healthy
+```
+
+points investigation toward the application/runtime layer rather than the EC2 host or AWS physical infrastructure.
+
+---
+
+### CloudWatch Alarms
+
+Three alarms were created:
+
+```text
+opsboard-alb-unhealthy-target
+opsboard-ec2-status-check-failed
+opsboard-rds-low-storage
+```
+
+The ALB alarm monitors:
+
+```text
+UnHealthyHostCount
+```
+
+using:
+
+```text
+period: 60 seconds
+evaluation periods: 2
+datapoints to alarm: 2
+threshold: >= 1
+```
+
+A single brief unhealthy datapoint therefore does not immediately transition the alarm into `ALARM`.
+
+---
+
+### Deliberate Alarm Trigger
+
+Nginx was stopped again specifically to validate the alarm.
+
+The metric changed:
+
+```text
+UnHealthyHostCount
+0
+→ 1
+```
+
+for consecutive periods.
+
+CloudWatch then changed:
+
+```text
+OK
+→ ALARM
+```
+
+The alarm reason explicitly showed two consecutive breaching datapoints.
+
+After Nginx restarted:
+
+```text
+EC2-local health
+→ 200 OK
+
+ALB target
+→ healthy
+
+UnHealthyHostCount
+→ 0
+```
+
+and CloudWatch returned:
+
+```text
+ALARM
+→ OK
+```
+
+This verified both detection and recovery behavior.
+
+---
+
+### SNS Alerting
+
+An SNS topic was created for OpsBoard alerts.
+
+An email subscription was added and confirmed.
+
+Before integrating with CloudWatch, SNS was tested independently.
+
+The test email arrived successfully.
+
+The ALB alarm was then configured with:
+
+```text
+alarm-actions
+ok-actions
+```
+
+both targeting the SNS topic.
+
+This enabled failure and recovery notifications.
+
+---
+
+### Notification Verification
+
+CloudWatch alarm history recorded successful SNS action execution for both:
+
+```text
+ALARM
+OK
+```
+
+state changes.
+
+SNS metrics were then checked:
+
+```text
+NumberOfMessagesPublished
+NumberOfNotificationsDelivered
+NumberOfNotificationsFailed
+```
+
+The failure and recovery notifications both showed:
+
+```text
+published = 1
+delivered = 1
+failed = 0
+```
+
+This established an evidence-based notification chain:
+
+```text
+CloudWatch state transition
+        ↓
+SNS publish
+        ↓
+SNS delivery
+        ↓
+email endpoint
+```
+
+The monitoring system was therefore verified beyond merely observing an alarm state in the console.
+
+---
+
+### Operational Troubleshooting Pattern
+
+Sprint 8 reinforced the troubleshooting method:
+
+```text
+Observe
+    ↓
+identify failing layer
+    ↓
+verify dependency beneath it
+    ↓
+repair only the failed layer
+    ↓
+verify outward toward the user
+```
+
+For the Nginx failure:
+
+```text
+Nginx state
+    ↓
+EC2-local /api/health
+    ↓
+ALB target health
+    ↓
+CloudWatch metric
+    ↓
+CloudWatch alarm
+    ↓
+public endpoint
+```
+
+The complete stack was not restarted blindly.
+
+Only the failed layer was repaired.
+
+---
+
+### Shell Variables and Durable Resource Discovery
+
+Several local shell variables disappeared between terminal sessions.
+
+This caused commands to fail when variables such as:
+
+```text
+INSTANCE_ID
+TARGET_GROUP_ARN
+```
+
+were empty.
+
+The AWS resources themselves still existed.
+
+The correct recovery pattern was:
+
+```text
+discover resource by tag or name
+    ↓
+restore shell variable
+```
+
+rather than guessing identifiers.
+
+This established:
+
+```text
+AWS resource
+→ durable
+
+shell variable
+→ temporary
+```
+
+Terraform will reduce much of this manual identifier bookkeeping in the next sprint.
+
+---
+
+### Cost-Aware Operating Pattern
+
+The lab operating pattern became:
+
+```text
+build
+    ↓
+verify
+    ↓
+observe
+    ↓
+document
+    ↓
+stop or delete expensive resources
+```
+
+This is especially important for:
+
+```text
+Application Load Balancer
+RDS
+EC2
+public IPv4
+storage
+```
+
+The lesson was that cost management should be part of system operations rather than an afterthought.
+
+---
+
+### Current Limitations
+
+Sprint 8 is intentionally not presented as a production-complete architecture.
+
+Current limitations include:
+
+```text
+single EC2 application instance
+Single-AZ RDS
+HTTP rather than HTTPS
+public application subnet
+no Auto Scaling Group
+no WAF
+no centralized application logs
+manual infrastructure provisioning
+host-managed application secret file
+```
+
+These limitations define the next engineering opportunities rather than invalidating the learning deployment.
+
+---
+
+### Final Sprint 8 Architecture
+
+```text
+Internet
+    ↓
+Application Load Balancer
+    ↓
+ALB Security Group
+    ↓
+EC2 Security Group
+    ↓
+Nginx
+    ↓
+Gunicorn
+    ↓
+Flask
+    ↓
+RDS Security Group
+    ↓
+Amazon RDS MySQL
+```
+
+Operations add:
+
+```text
+ALB metrics
+EC2 metrics
+RDS metrics
+      ↓
+CloudWatch
+      ↓
+CloudWatch alarms
+      ↓
+Amazon SNS
+      ↓
+email notification
+```
+
+Administration uses:
+
+```text
+Ubuntu workstation
+      ↓
+AWS CLI
+      ↓
+Systems Manager
+      ↓
+EC2
+```
+
+---
+
+### Key Engineering Lessons
+
+* Manual infrastructure work is valuable when the objective is to understand the resources that will later be automated.
+* Public routing and traffic permission are different networking concerns.
+* Security-group references create useful trust boundaries between tiers.
+* A public IPv4 address does not override security-group restrictions.
+* Infrastructure failures should be isolated by layer.
+* Database reachability, authentication, schema state, and application behavior are separate diagnostic domains.
+* ALB `502` and `503` errors can indicate different failure conditions.
+* Application health and EC2 infrastructure health are not the same thing.
+* CloudWatch metrics can reconstruct incidents after they occur.
+* Metric publication can lag behind the event being observed.
+* CPU credits are both a performance and cost signal on burstable instances.
+* Monitoring without tested alarms is incomplete.
+* Alerting without tested notification delivery is incomplete.
+* Repair should target the failed component rather than restart the entire system.
+* Internet-facing infrastructure should be assumed to receive unsolicited traffic.
+* Cost control is part of DevOps operations.
+
+---
+
+### Sprint 8 Outcome
+
+OpsBoard progressed from a locally reproducible release artifact into a manually deployed AWS application with:
+
+* dedicated VPC networking;
+* public and private subnet separation;
+* security-group tier isolation;
+* private managed MySQL;
+* EC2-hosted container runtime;
+* SSM-based administration;
+* Application Load Balancer ingress;
+* verified security boundaries;
+* native AWS observability;
+* failure telemetry;
+* CloudWatch alarms;
+* SNS email notifications;
+* recovery verification;
+* AWS cost controls.
+
+The project now demonstrates not only how to deploy a containerized application to AWS, but how to reason about its network path, security boundary, infrastructure health, application health, failure modes, telemetry, alerts, recovery, and cost.
+
+Sprint 9 will take the manually understood architecture and reproduce it using Terraform:
+
+```text
+manual AWS infrastructure
+        ↓
+understood architecture
+        ↓
+Terraform
+        ↓
+repeatable infrastructure
+        ↓
+controlled change
+        ↓
+safe destruction and recreation
+```
