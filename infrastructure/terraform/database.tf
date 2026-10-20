@@ -22,9 +22,10 @@ resource "aws_db_instance" "opsboard" {
   storage_type      = "gp3"
   storage_encrypted = true
 
-  db_name  = "mydatabase"
-  username = var.db_username
-  password = var.db_password
+  db_name             = "mydatabase"
+  username            = var.db_username
+  password_wo         = var.db_password
+  password_wo_version = 1
 
   db_subnet_group_name   = aws_db_subnet_group.opsboard.name
   vpc_security_group_ids = [aws_security_group.rds.id]

@@ -33,3 +33,23 @@ resource "aws_iam_instance_profile" "ec2" {
     Name = "OpsBoardEC2InstanceProfile"
   }
 }
+
+data "aws_iam_policy_document" "ec2_runtime_secrets" {
+  statement {
+    effect = "Allow"
+
+    actions = [
+      "ssm:GetParameter"
+    ]
+
+    resources = [
+      aws_ssm_parameter.db_password.arn
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "ec2_runtime_secrets" {
+  name   = "OpsBoardRuntimeSecrets"
+  role   = aws_iam_role.ec2.id
+  policy = data.aws_iam_policy_document.ec2_runtime_secrets.json
+}

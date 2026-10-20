@@ -8,6 +8,7 @@ variable "db_password" {
   description = "OpsBoard RDS master password"
   type        = string
   sensitive   = true
+  ephemeral   = true
 }
 
 variable "alert_email" {
