@@ -27,6 +27,7 @@ resource "aws_instance" "app" {
   user_data_replace_on_change = true
 
   depends_on = [
+    aws_iam_role_policy_attachment.ssm_core,
     aws_iam_role_policy.ec2_runtime_secrets
   ]
 
