@@ -15,3 +15,9 @@ variable "alert_email" {
   description = "Email address subscribed to OpsBoard SNS alerts"
   type        = string
 }
+
+variable "backend_image" {
+  description = "Immutable OpsBoard backend container image"
+  type        = string
+  default     = "ghcr.io/wondwossenh9/opsboard-backend:b58b1c51c20196dc3d5c382dc31681bd5b755800"
+}

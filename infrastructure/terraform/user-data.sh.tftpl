@@ -1,0 +1,251 @@
+#!/bin/bash
+set -euo pipefail
+
+exec > >(tee -a /var/log/opsboard-bootstrap.log) 2>&1
+
+echo "[opsboard] bootstrap started"
+
+export DEBIAN_FRONTEND=noninteractive
+
+# ------------------------------------------------------------
+# Install required host packages
+# ------------------------------------------------------------
+
+echo "[opsboard] installing host dependencies"
+
+apt-get update
+apt-get install -y \
+  docker.io \
+  curl \
+  unzip
+
+systemctl enable --now docker
+
+# ------------------------------------------------------------
+# Install AWS CLI v2 if it is not already available
+# ------------------------------------------------------------
+
+if ! command -v aws >/dev/null 2>&1; then
+  echo "[opsboard] installing AWS CLI v2"
+
+  curl -fsSL \
+    "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" \
+    -o /tmp/awscliv2.zip
+
+  rm -rf /tmp/aws
+  unzip -q /tmp/awscliv2.zip -d /tmp
+
+  /tmp/aws/install
+
+  rm -rf /tmp/aws /tmp/awscliv2.zip
+fi
+
+# ------------------------------------------------------------
+# Create protected OpsBoard configuration directory
+# ------------------------------------------------------------
+
+echo "[opsboard] preparing configuration directory"
+
+install -d -m 700 /etc/opsboard
+
+# ------------------------------------------------------------
+# Retrieve database secret from AWS Systems Manager
+# ------------------------------------------------------------
+
+echo "[opsboard] retrieving database password from SSM"
+
+DB_PASSWORD="$(aws ssm get-parameter \
+  --region "${aws_region}" \
+  --name "${db_password_parameter_name}" \
+  --with-decryption \
+  --query 'Parameter.Value' \
+  --output text)"
+
+if [ -z "$DB_PASSWORD" ] || [ "$DB_PASSWORD" = "None" ]; then
+  echo "[opsboard] failed to retrieve database password"
+  exit 1
+fi
+
+# ------------------------------------------------------------
+# Create backend runtime environment
+# ------------------------------------------------------------
+
+echo "[opsboard] creating backend runtime configuration"
+
+umask 077
+
+cat > /etc/opsboard/backend.env <<EOF
+DB_HOST=${db_host}
+DB_PORT=3306
+DB_NAME=${db_name}
+DB_USER=${db_user}
+DB_PASSWORD=$DB_PASSWORD
+EOF
+
+chmod 600 /etc/opsboard/backend.env
+
+# ------------------------------------------------------------
+# Restore version-controlled deployment files
+#
+# Terraform reads these files from the repository:
+#
+#   db/migrations/001_create_incidents.sql
+#   nginx/nginx.conf
+#
+# and passes them into this template as base64 strings.
+# ------------------------------------------------------------
+
+echo "[opsboard] restoring database migration"
+
+printf '%s' "${migration_sql_b64}" \
+  | base64 --decode \
+  > /etc/opsboard/001_create_incidents.sql
+
+echo "[opsboard] restoring nginx configuration"
+
+printf '%s' "${nginx_conf_b64}" \
+  | base64 --decode \
+  > /etc/opsboard/nginx.conf
+
+# ------------------------------------------------------------
+# Create application Docker network
+# ------------------------------------------------------------
+
+echo "[opsboard] preparing Docker network"
+
+docker network inspect opsboard-network >/dev/null 2>&1 \
+  || docker network create opsboard-network
+
+# ------------------------------------------------------------
+# Pull immutable application and supporting images
+# ------------------------------------------------------------
+
+echo "[opsboard] pulling backend image"
+
+docker pull "${backend_image}"
+
+echo "[opsboard] pulling nginx image"
+
+docker pull nginx:alpine
+
+echo "[opsboard] pulling MySQL client image"
+
+docker pull mysql:8.0
+
+# ------------------------------------------------------------
+# Apply version-controlled database migration
+#
+# RDS may still be becoming reachable when EC2 bootstraps,
+# so retry rather than assuming immediate availability.
+# ------------------------------------------------------------
+
+echo "[opsboard] applying database migration"
+
+for attempt in $(seq 1 30); do
+  echo "[opsboard] migration attempt $attempt of 30"
+
+  if docker run --rm \
+    --env-file /etc/opsboard/backend.env \
+    -v /etc/opsboard/001_create_incidents.sql:/migration.sql:ro \
+    mysql:8.0 \
+    sh -c 'mysql \
+      -h "$DB_HOST" \
+      -P "$DB_PORT" \
+      -u"$DB_USER" \
+      -p"$DB_PASSWORD" \
+      "$DB_NAME" \
+      < /migration.sql'
+  then
+    echo "[opsboard] database migration succeeded"
+    break
+  fi
+
+  if [ "$attempt" -eq 30 ]; then
+    echo "[opsboard] database migration failed after 30 attempts"
+    exit 1
+  fi
+
+  echo "[opsboard] database not ready; retrying in 10 seconds"
+  sleep 10
+done
+
+# ------------------------------------------------------------
+# Remove old application containers if they somehow exist
+# ------------------------------------------------------------
+
+docker rm -f opsboard-backend >/dev/null 2>&1 || true
+docker rm -f opsboard-nginx >/dev/null 2>&1 || true
+
+# ------------------------------------------------------------
+# Start backend
+#
+# The backend:
+# - uses the immutable GHCR release image
+# - receives configuration at runtime
+# - joins the private Docker application network
+# - receives the DNS alias "backend"
+# - exposes Gunicorn only through EC2 loopback
+# ------------------------------------------------------------
+
+echo "[opsboard] starting backend container"
+
+docker run -d \
+  --name opsboard-backend \
+  --restart unless-stopped \
+  --network opsboard-network \
+  --network-alias backend \
+  --env-file /etc/opsboard/backend.env \
+  -p 127.0.0.1:8000:8000 \
+  "${backend_image}"
+
+# ------------------------------------------------------------
+# Start Nginx
+#
+# Nginx is the host-level HTTP entry point.
+# The ALB connects to EC2 port 80.
+# Nginx then reaches the backend through Docker DNS.
+# ------------------------------------------------------------
+
+echo "[opsboard] starting nginx container"
+
+docker run -d \
+  --name opsboard-nginx \
+  --restart unless-stopped \
+  --network opsboard-network \
+  -p 80:80 \
+  -v /etc/opsboard/nginx.conf:/etc/nginx/nginx.conf:ro \
+  nginx:alpine
+
+# ------------------------------------------------------------
+# Verify application health locally
+# ------------------------------------------------------------
+
+echo "[opsboard] waiting for local application health"
+
+for attempt in $(seq 1 30); do
+  echo "[opsboard] health-check attempt $attempt of 30"
+
+  if curl -fsS http://127.0.0.1/api/health; then
+    echo
+    echo "[opsboard] bootstrap completed successfully"
+    exit 0
+  fi
+
+  sleep 5
+done
+
+echo "[opsboard] local health verification failed"
+
+echo "[opsboard] backend container status:"
+docker ps -a --filter name=opsboard-backend || true
+
+echo "[opsboard] nginx container status:"
+docker ps -a --filter name=opsboard-nginx || true
+
+echo "[opsboard] backend logs:"
+docker logs --tail 50 opsboard-backend 2>&1 || true
+
+echo "[opsboard] nginx logs:"
+docker logs --tail 50 opsboard-nginx 2>&1 || true
+
+exit 1
