@@ -14,6 +14,15 @@ variable "db_password" {
 variable "alert_email" {
   description = "Email address subscribed to OpsBoard SNS alerts"
   type        = string
+
+  validation {
+    condition = can(regex(
+      "^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$",
+      var.alert_email
+    ))
+
+    error_message = "alert_email must be a valid email address."
+  }
 }
 
 variable "backend_image" {
