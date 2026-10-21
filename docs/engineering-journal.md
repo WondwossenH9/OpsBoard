@@ -2690,3 +2690,1827 @@ controlled change
         ↓
 safe destruction and recreation
 ```
+
+---
+
+# Sprint 9 — Terraform Infrastructure as Code
+
+## Objective
+
+Sprint 8 established the OpsBoard AWS architecture manually.
+
+The purpose of Sprint 9 was not to invent a different architecture.
+
+The purpose was to take the infrastructure that had already been understood operationally and convert it into reproducible Infrastructure as Code using Terraform.
+
+The target lifecycle was:
+
+```text
+terraform apply
+        ↓
+working OpsBoard environment
+        ↓
+terraform plan
+        ↓
+no drift
+        ↓
+terraform destroy
+        ↓
+infrastructure removed
+        ↓
+terraform apply
+        ↓
+working OpsBoard environment again
+```
+
+The sprint would not be considered complete merely because:
+
+```text
+terraform apply
+```
+
+successfully created AWS resources once.
+
+The stronger goal was to prove:
+
+```text
+same configuration
+        ↓
+destroy existing environment
+        ↓
+create completely new AWS resources
+        ↓
+recover the same architecture
+        ↓
+recover the same application behavior
+```
+
+This changed the focus from:
+
+```text
+Can Terraform create infrastructure?
+```
+
+to:
+
+```text
+Is the infrastructure genuinely reproducible?
+```
+
+---
+
+## Why Terraform Came After Manual AWS Deployment
+
+The Sprint 8 architecture was deliberately built manually before introducing Terraform.
+
+That sequence made it possible to understand the purpose of each resource before automating it.
+
+The manually understood path was:
+
+```text
+Internet
+    ↓
+Application Load Balancer
+    ↓
+EC2
+    ↓
+Nginx
+    ↓
+Gunicorn
+    ↓
+Flask
+    ↓
+Amazon RDS MySQL
+```
+
+Supporting infrastructure included:
+
+```text
+VPC
+subnets
+route tables
+Internet Gateway
+security groups
+IAM
+Systems Manager
+CloudWatch
+SNS
+```
+
+Without that understanding, Terraform could easily become a collection of copied resource blocks whose relationships were not understood.
+
+The learning principle established was:
+
+```text
+understand manually
+        ↓
+model declaratively
+        ↓
+automate confidently
+```
+
+---
+
+## Terraform Foundation
+
+Terraform `1.16.x` was installed and the AWS provider was pinned to:
+
+```text
+~> 6.69
+```
+
+The provider lock file was committed:
+
+```text
+infrastructure/terraform/.terraform.lock.hcl
+```
+
+while local Terraform working files were excluded from version control.
+
+The repository ignores:
+
+```text
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+```
+
+while retaining:
+
+```text
+.terraform.lock.hcl
+terraform.tfvars.example
+```
+
+This established the distinction:
+
+```text
+configuration
+→ version controlled
+
+provider dependency lock
+→ version controlled
+
+real secrets
+→ local only
+
+Terraform state
+→ local only in this sprint
+```
+
+Remote state remains a later improvement.
+
+---
+
+## Configuration, State, and Real Infrastructure
+
+One of the first important Terraform concepts was the distinction between:
+
+```text
+Configuration
+State
+Real AWS infrastructure
+```
+
+They answer different questions.
+
+```text
+Configuration
+→ What should exist?
+
+State
+→ What does Terraform believe it manages?
+
+AWS
+→ What actually exists?
+```
+
+This became especially important because Sprint 8 already had manually created AWS infrastructure.
+
+Declaring:
+
+```hcl
+resource "aws_vpc" "opsboard" {
+  ...
+}
+```
+
+does not cause Terraform to automatically locate and adopt an existing VPC with the same name.
+
+The important principle was:
+
+```text
+resource exists in AWS
+        ≠
+resource managed by Terraform
+```
+
+Existing resources would require explicit import if they were to become Terraform-managed.
+
+For Sprint 9, clean recreation was chosen instead.
+
+---
+
+## Manual Infrastructure Teardown
+
+Before the first real Terraform deployment, the manually created Sprint 8 environment was deliberately dismantled.
+
+This was important because otherwise a successful Terraform deployment might only prove that Terraform could coexist with manually created infrastructure.
+
+The goal was stronger:
+
+```text
+manual environment removed
+        ↓
+Terraform state initially empty
+        ↓
+Terraform configuration becomes source of truth
+```
+
+The manual teardown also reinforced dependency ordering.
+
+Higher-level dependencies were removed before lower-level networking resources.
+
+Examples included:
+
+```text
+CloudWatch / SNS
+        ↓
+target group
+        ↓
+EC2
+        ↓
+RDS
+        ↓
+IAM
+        ↓
+security groups
+        ↓
+subnets / route tables
+        ↓
+Internet Gateway
+        ↓
+VPC
+```
+
+Delete-verification errors such as:
+
+```text
+TargetGroupNotFound
+DBInstanceNotFound
+NoSuchEntity
+InvalidInternetGatewayID.NotFound
+InvalidVpcID.NotFound
+```
+
+were interpreted correctly as evidence of successful removal when checking resources that had intentionally been deleted.
+
+The distinction established was:
+
+```text
+"not found" during creation
+→ possible problem
+
+"not found" while verifying deletion
+→ often successful evidence
+```
+
+---
+
+## Terraform Network Modeling
+
+The first major Terraform layer reproduced the Sprint 8 network foundation.
+
+The VPC uses:
+
+```text
+10.0.0.0/16
+```
+
+with four subnets:
+
+```text
+Public A      10.0.1.0/24
+Public B      10.0.2.0/24
+
+Private DB A  10.0.11.0/24
+Private DB B  10.0.12.0/24
+```
+
+The public subnets share a route table containing:
+
+```text
+0.0.0.0/0
+    ↓
+Internet Gateway
+```
+
+The database subnets use a separate private route table without an Internet default route.
+
+The architecture therefore preserves:
+
+```text
+ALB
+→ public subnets
+
+EC2
+→ public application subnet
+
+RDS
+→ private DB subnets
+```
+
+No NAT Gateway was introduced because this remains a cost-conscious learning environment.
+
+---
+
+## Terraform References and the Dependency Graph
+
+Manual AWS work required repeatedly discovering and copying identifiers such as:
+
+```text
+VPC IDs
+subnet IDs
+security-group IDs
+instance IDs
+target-group ARNs
+RDS endpoints
+```
+
+Terraform replaces much of that bookkeeping with resource references.
+
+For example:
+
+```hcl
+subnet_id = aws_subnet.public_a.id
+```
+
+and:
+
+```hcl
+vpc_id = aws_vpc.opsboard.id
+```
+
+and:
+
+```hcl
+target_id = aws_instance.app.id
+```
+
+The configuration expresses relationships rather than physical identifiers.
+
+This creates a dependency graph.
+
+Conceptually:
+
+```text
+VPC
+ ↓
+subnets
+ ↓
+security groups
+ ↓
+EC2 / RDS / ALB
+```
+
+Terraform uses those relationships for both creation and destruction ordering.
+
+This was one of the strongest conceptual differences from the manual Sprint 8 workflow.
+
+---
+
+## Security Group Modeling
+
+Three security groups were modeled:
+
+```text
+ALB
+EC2
+RDS
+```
+
+Ingress follows:
+
+```text
+Internet
+    ↓ TCP 80
+ALB SG
+    ↓ TCP 80
+EC2 SG
+    ↓ TCP 3306
+RDS SG
+```
+
+The EC2 ingress rule references the ALB security group.
+
+The RDS ingress rule references the EC2 security group.
+
+This preserves the trust boundaries established manually in Sprint 8.
+
+The application host does not expose:
+
+```text
+SSH :22
+Gunicorn :8000
+```
+
+to the Internet.
+
+Administration continues through Systems Manager.
+
+---
+
+## IAM and Systems Manager
+
+Terraform creates the EC2 IAM role and instance profile.
+
+The EC2 role includes:
+
+```text
+AmazonSSMManagedInstanceCore
+```
+
+for Systems Manager connectivity.
+
+A separate runtime-secret policy grants only:
+
+```text
+ssm:GetParameter
+```
+
+for the OpsBoard database-password parameter.
+
+The intended permission path is:
+
+```text
+EC2
+ ↓
+instance profile
+ ↓
+OpsBoardEC2Role
+ ↓
+ssm:GetParameter
+ ↓
+/opsboard/db/password
+```
+
+A broad:
+
+```text
+ssm:* on *
+```
+
+permission was not used.
+
+This preserved the least-privilege objective while still supporting automated runtime configuration.
+
+---
+
+## Terraform Secret Handling
+
+Database credentials required particular care because Terraform state can contain values that should not be persisted.
+
+The database password variable was defined as:
+
+```text
+sensitive
+ephemeral
+```
+
+The RDS resource uses a write-only password argument.
+
+The SSM SecureString parameter also uses a write-only value.
+
+The resulting design is:
+
+```text
+local terraform.tfvars
+        ↓
+ephemeral db_password
+        ├────────→ RDS
+        |
+        └────────→ SSM SecureString
+                          ↓
+                    EC2 retrieves
+```
+
+This was an important refinement of the common misconception:
+
+```text
+sensitive = hidden
+```
+
+does not necessarily mean:
+
+```text
+sensitive = absent from state
+```
+
+The stronger design uses ephemeral and write-only capabilities where supported.
+
+The real:
+
+```text
+terraform.tfvars
+```
+
+remains ignored.
+
+Only:
+
+```text
+terraform.tfvars.example
+```
+
+is committed.
+
+---
+
+## EC2 Modeling
+
+Terraform creates a:
+
+```text
+t3.micro
+```
+
+EC2 application host using an Ubuntu x86_64 AMI.
+
+The x86_64 architecture was selected deliberately because the existing GHCR backend image had already been built and verified for that architecture.
+
+The instance uses:
+
+```text
+encrypted gp3 root volume
+IMDSv2 required
+standard CPU credits
+public IPv4
+Systems Manager instance profile
+```
+
+Although the instance is placed in a public subnet for this lab architecture, inbound HTTP is still restricted to the ALB security group.
+
+A public subnet does not itself mean:
+
+```text
+publicly reachable application
+```
+
+Routing and security rules remain separate controls.
+
+---
+
+## RDS Modeling
+
+Terraform creates private Amazon RDS MySQL.
+
+The database configuration includes:
+
+```text
+MySQL 8.0
+db.t4g.micro
+20 GiB gp3
+encrypted storage
+Single-AZ
+publicly accessible = false
+```
+
+The subnet group spans the two private database subnets.
+
+The database remains deliberately destroyable for the learning environment:
+
+```text
+deletion protection = false
+skip final snapshot = true
+```
+
+This would not be the normal production data-protection posture.
+
+It exists here because Sprint 9 explicitly requires repeated destruction and recreation.
+
+---
+
+## Load Balancer Modeling
+
+Terraform creates:
+
+```text
+Application Load Balancer
+target group
+listener
+target attachment
+```
+
+The ALB spans both public subnets.
+
+The target group health check uses:
+
+```text
+GET /api/health
+```
+
+with:
+
+```text
+HTTP
+port 80
+matcher 200
+30-second interval
+5-second timeout
+2 healthy checks
+2 unhealthy checks
+```
+
+The EC2 target is attached using:
+
+```hcl
+target_id = aws_instance.app.id
+```
+
+rather than a copied physical instance ID.
+
+---
+
+## Monitoring and Alerting
+
+Sprint 8 monitoring resources were also modeled.
+
+Terraform creates alarms for:
+
+```text
+ALB unhealthy target
+EC2 status-check failure
+RDS low free storage
+```
+
+The ALB alarm publishes:
+
+```text
+ALARM
+```
+
+and:
+
+```text
+OK
+```
+
+state changes to the SNS topic.
+
+The SNS email endpoint remains a local input rather than repository configuration.
+
+This reproduces the monitoring architecture already proven manually in Sprint 8.
+
+---
+
+## Automating the Application Runtime
+
+A major design question was whether Terraform should only create AWS infrastructure or also make the EC2 host operational.
+
+The sprint objective required:
+
+```text
+terraform apply
+→ working OpsBoard
+```
+
+not:
+
+```text
+terraform apply
+→ empty EC2 server
+→ manually configure application
+```
+
+Therefore EC2 user data was introduced through:
+
+```text
+user-data.sh.tftpl
+```
+
+The bootstrap performs:
+
+```text
+install Docker
+        ↓
+install AWS CLI if required
+        ↓
+create protected configuration directory
+        ↓
+retrieve database password
+        ↓
+write runtime environment
+        ↓
+restore SQL migration
+        ↓
+restore Nginx configuration
+        ↓
+create Docker network
+        ↓
+pull backend image
+        ↓
+pull Nginx image
+        ↓
+pull MySQL client image
+        ↓
+apply RDS migration
+        ↓
+start backend
+        ↓
+start Nginx
+        ↓
+verify local application health
+```
+
+This converted:
+
+```text
+Terraform creates infrastructure
+```
+
+into:
+
+```text
+Terraform creates usable application infrastructure
+```
+
+---
+
+## Reusing Repository-Owned Configuration
+
+The existing Sprint 7 migration:
+
+```text
+db/migrations/001_create_incidents.sql
+```
+
+and Nginx configuration:
+
+```text
+nginx/nginx.conf
+```
+
+were already the project sources of truth.
+
+Creating separate copies inside the Terraform directory would introduce duplication.
+
+Instead Terraform reads those files and supplies them to the user-data template.
+
+Conceptually:
+
+```text
+repository-owned file
+        ↓
+Terraform file()
+        ↓
+base64encode()
+        ↓
+templatefile()
+        ↓
+EC2 user data
+        ↓
+restored on host
+```
+
+This keeps the application and infrastructure layers connected without maintaining duplicate configurations.
+
+---
+
+## Immutable Backend Artifact
+
+Terraform does not build application source on EC2.
+
+The backend image remains the SHA-tagged GHCR artifact produced during Sprint 7.
+
+The deployment uses:
+
+```text
+ghcr.io/wondwossenh9/opsboard-backend:<git-sha>
+```
+
+The deployment philosophy remains:
+
+```text
+build once
+    ↓
+publish
+    ↓
+deploy same artifact
+```
+
+Before relying on this during automated bootstrap, unauthenticated GHCR access was tested.
+
+After:
+
+```text
+docker logout ghcr.io
+```
+
+the SHA-tagged image could still be resolved and pulled.
+
+This established that a fresh EC2 host would not require an interactive registry login.
+
+---
+
+## Database Migration During Bootstrap
+
+The backend cannot function correctly against a database that exists but lacks its application schema.
+
+The EC2 bootstrap therefore runs the version-controlled migration before starting the backend.
+
+The migration uses a temporary:
+
+```text
+mysql:8.0
+```
+
+container as a client.
+
+The database startup relationship is:
+
+```text
+RDS resource created
+        ↓
+EC2 bootstrap begins
+        ↓
+attempt migration
+        ↓
+retry if database not ready
+        ↓
+migration succeeds
+        ↓
+backend starts
+```
+
+The bootstrap retries migration because:
+
+```text
+RDS API says available
+        ≠
+every application connection is guaranteed ready at the same instant
+```
+
+If migration continues failing after the retry window, bootstrap exits instead of silently starting the application against an unprepared schema.
+
+---
+
+## Bootstrap Logging and Secret Hygiene
+
+Bootstrap output is written to:
+
+```text
+/var/log/opsboard-bootstrap.log
+```
+
+The script deliberately uses:
+
+```bash
+set -euo pipefail
+```
+
+but does not enable:
+
+```bash
+set -x
+```
+
+because shell tracing could expose runtime secrets.
+
+This established an observability tradeoff:
+
+```text
+useful bootstrap logs
+        +
+fail-fast behavior
+        -
+secret disclosure
+```
+
+Secrets should not be exposed merely to make debugging easier.
+
+---
+
+## IAM Bootstrap Dependency
+
+An operational race was considered around EC2 startup and IAM readiness.
+
+The instance needs both:
+
+```text
+Systems Manager permissions
+runtime secret-read permissions
+```
+
+during bootstrap.
+
+Explicit dependencies were therefore added so EC2 creation waits for the relevant IAM role-policy relationships.
+
+This reduces the chance of launching the host before the permissions required by its bootstrap path are ready.
+
+---
+
+## First Terraform Plan
+
+Once the main infrastructure layers were modeled, Terraform proposed:
+
+```text
+39 to add
+0 to change
+0 to destroy
+```
+
+This was the first complete picture of the desired environment.
+
+The 39 count represented AWS resources being created.
+
+IAM policy-document data sources also appeared during evaluation, but those do not represent additional AWS resources.
+
+This distinction became visible later when:
+
+```text
+terraform state list
+```
+
+included both:
+
+```text
+data.aws_iam_policy_document...
+```
+
+and provisioned resource addresses.
+
+---
+
+## First Apply: Partial Failure
+
+The first apply did not complete perfectly.
+
+The SNS email subscription failed because the configured email input was rejected by AWS.
+
+The important behavior was what Terraform did next.
+
+Terraform did not automatically remove all resources that had already been created successfully.
+
+Instead:
+
+```text
+apply begins
+        ↓
+many resources succeed
+        ↓
+SNS subscription fails
+        ↓
+successful resources remain
+        ↓
+state records successful resources
+```
+
+This demonstrated:
+
+```text
+terraform apply
+        ≠
+database-style transaction with full rollback
+```
+
+The failed input was corrected.
+
+Terraform was then run again.
+
+The second apply reported:
+
+```text
+Resources: 1 added, 0 changed, 0 destroyed.
+```
+
+Only the missing resource was created.
+
+This was a concrete demonstration of convergence.
+
+---
+
+## Terraform Convergence
+
+After the corrected apply, Terraform was run again with:
+
+```text
+terraform plan
+```
+
+It reported:
+
+```text
+No changes. Your infrastructure matches the configuration.
+```
+
+This was important evidence.
+
+At that moment:
+
+```text
+configuration
+        =
+state
+        =
+observed AWS infrastructure
+```
+
+according to Terraform's refresh and comparison.
+
+The successful initial deployment was therefore not treated as complete until a second plan confirmed no outstanding changes.
+
+---
+
+## First Application Readiness
+
+The ALB target eventually returned:
+
+```text
+healthy
+```
+
+which demonstrated that the automated bootstrap successfully progressed far enough for:
+
+```text
+ALB
+ ↓
+EC2 port 80
+ ↓
+Nginx
+ ↓
+Gunicorn
+ ↓
+Flask /api/health
+```
+
+to work.
+
+This proved that Terraform was not merely creating AWS objects.
+
+It was creating an operational application path.
+
+---
+
+## Destroy Plan
+
+The next stage tested whether the infrastructure was actually disposable.
+
+Terraform produced:
+
+```text
+Plan: 0 to add, 0 to change, 39 to destroy.
+```
+
+At this stage, an important distinction appeared.
+
+Running:
+
+```text
+terraform plan -destroy
+```
+
+does not destroy anything.
+
+It only previews the actions.
+
+When:
+
+```text
+terraform state list
+```
+
+was run immediately afterward, all resources were still tracked.
+
+A normal:
+
+```text
+terraform plan
+```
+
+still reported:
+
+```text
+No changes.
+```
+
+This reinforced:
+
+```text
+plan
+→ prediction
+
+apply / destroy
+→ action
+```
+
+---
+
+## Actual Terraform Destroy
+
+The real destroy was then executed.
+
+Terraform followed the resource dependency graph and removed the environment.
+
+The final result was:
+
+```text
+Destroy complete! Resources: 39 destroyed.
+```
+
+Afterward:
+
+```text
+terraform state list
+```
+
+returned no managed resources.
+
+This represented:
+
+```text
+Terraform configuration
+→ still exists
+
+Terraform state
+→ empty
+
+AWS managed environment
+→ removed
+```
+
+A new plan produced:
+
+```text
+Plan: 39 to add, 0 to change, 0 to destroy.
+```
+
+That result was a major Sprint 9 checkpoint.
+
+Terraform had no resources left in state but still knew exactly how to reconstruct the environment.
+
+---
+
+## Why Destroy Was More Important Than It First Appeared
+
+A single successful apply can hide dependencies on:
+
+```text
+manual setup
+old AWS resources
+shell variables
+previous configuration
+one-off console actions
+```
+
+The destroy test removed those hidden assumptions.
+
+The environment was intentionally forced back to:
+
+```text
+nothing managed
+```
+
+before the second deployment.
+
+This changed the evidence from:
+
+```text
+Terraform once created something that worked
+```
+
+to:
+
+```text
+Terraform can reconstruct the system after complete removal
+```
+
+---
+
+## Second Clean Apply
+
+Terraform was applied again from empty state.
+
+AWS generated new physical resource identifiers.
+
+The first Terraform deployment had included:
+
+```text
+VPC → vpc-0f592ca583c27082c
+EC2 → i-055886e195cd03b15
+```
+
+The recreated deployment produced:
+
+```text
+VPC → vpc-080e125e9f9dcfacc
+EC2 → i-02b361873b71f41ab
+```
+
+The IDs were different.
+
+The declared architecture remained the same.
+
+This demonstrated:
+
+```text
+physical identity
+→ replaceable
+
+desired configuration
+→ durable
+```
+
+The project no longer depended on manually preserved AWS IDs.
+
+---
+
+## Initial ALB Failure During Recreation
+
+During the second deployment, ALB target health initially reported:
+
+```text
+Target.FailedHealthChecks
+unhealthy
+```
+
+This became an important troubleshooting exercise.
+
+The first reaction was deliberately not:
+
+```text
+change security groups
+```
+
+or:
+
+```text
+rerun Terraform
+```
+
+or:
+
+```text
+restart everything
+```
+
+Instead, evidence was collected layer by layer.
+
+---
+
+## EC2 and Systems Manager Evidence
+
+The EC2 instance reported:
+
+```text
+running
+```
+
+Systems Manager reported:
+
+```text
+Online
+```
+
+This established that:
+
+```text
+EC2 exists
+        ↓
+instance is running
+        ↓
+IAM/SSM path is functioning
+```
+
+but did not yet prove the application was ready.
+
+The distinction was:
+
+```text
+host health
+        ≠
+application health
+```
+
+---
+
+## Bootstrap Investigation
+
+A Systems Manager command inspected:
+
+```text
+cloud-init status
+bootstrap log
+Docker containers
+localhost /api/health
+```
+
+At that time:
+
+```text
+cloud-init status
+→ running
+```
+
+The bootstrap log already showed successful progress through:
+
+```text
+host package installation
+AWS CLI installation
+configuration directory creation
+SSM database-password retrieval
+runtime environment creation
+migration restoration
+Nginx config restoration
+Docker network creation
+backend image pull
+Nginx image pull
+MySQL image pull
+database migration
+```
+
+Most importantly:
+
+```text
+database migration succeeded
+```
+
+This ruled out several possible causes.
+
+It established that:
+
+```text
+RDS networking
+database authentication
+SSM secret retrieval
+database existence
+schema application
+```
+
+were already working.
+
+---
+
+## Local HTTP Failure
+
+The same diagnostic command attempted:
+
+```text
+curl http://127.0.0.1/api/health
+```
+
+and received:
+
+```text
+Failed to connect to 127.0.0.1 port 80
+```
+
+The bootstrap log had only reached:
+
+```text
+[opsboard] starting backend container
+```
+
+It had not yet completed:
+
+```text
+[opsboard] starting nginx container
+```
+
+Therefore the local HTTP failure was consistent with the evidence.
+
+The system had been observed during initialization.
+
+The correct interpretation was:
+
+```text
+port 80 unavailable
+        because
+Nginx not yet started
+```
+
+rather than:
+
+```text
+port 80 unavailable
+        therefore
+security group is broken
+```
+
+---
+
+## Infrastructure Ready vs. Application Ready
+
+This became one of the most valuable lessons of Sprint 9.
+
+The second environment demonstrated:
+
+```text
+EC2 running
+        ≠
+application ready
+```
+
+and:
+
+```text
+SSM Online
+        ≠
+Nginx ready
+```
+
+and:
+
+```text
+Terraform resource creation complete
+        ≠
+all asynchronous initialization already finished
+```
+
+Different readiness signals answer different questions.
+
+```text
+EC2 state
+→ is the VM running?
+
+SSM PingStatus
+→ can Systems Manager communicate with it?
+
+cloud-init
+→ has bootstrap completed?
+
+Docker state
+→ are runtime containers running?
+
+localhost health
+→ is the application responding locally?
+
+ALB target health
+→ can the load balancer successfully reach the application?
+```
+
+These signals should not be treated as interchangeable.
+
+---
+
+## Recovery Without Configuration Changes
+
+No security-group rule was changed.
+
+No random EC2 reboot was performed.
+
+No Terraform resource was modified.
+
+After bootstrap completed, ALB target health changed to:
+
+```text
+healthy
+```
+
+This proved that the initial failure was a readiness timing issue rather than a broken infrastructure definition.
+
+The diagnostic sequence was:
+
+```text
+observe unhealthy target
+        ↓
+verify EC2
+        ↓
+verify SSM
+        ↓
+inspect cloud-init
+        ↓
+inspect bootstrap log
+        ↓
+confirm migration succeeded
+        ↓
+identify bootstrap still running
+        ↓
+allow initialization to finish
+        ↓
+ALB healthy
+```
+
+This reinforced the operating principle:
+
+> Gather evidence before intervention.
+
+---
+
+## Final Terraform Convergence
+
+After the recreated environment became healthy:
+
+```text
+terraform plan
+```
+
+again returned:
+
+```text
+No changes. Your infrastructure matches the configuration.
+```
+
+This completed the central Sprint 9 proof.
+
+The lifecycle was:
+
+```text
+configuration
+    ↓
+apply
+    ↓
+working environment
+    ↓
+no changes
+    ↓
+destroy 39 resources
+    ↓
+empty state
+    ↓
+plan 39 resources
+    ↓
+apply again
+    ↓
+new physical AWS resources
+    ↓
+healthy target
+    ↓
+no changes
+```
+
+This is substantially stronger evidence than simply showing Terraform source files.
+
+---
+
+## Resource Identity vs. Desired State
+
+Before Terraform, AWS resource IDs could feel important because they were repeatedly copied into commands.
+
+Sprint 9 changed that perspective.
+
+For example:
+
+```text
+old EC2
+i-055886e195cd03b15
+```
+
+was destroyed.
+
+A new EC2 appeared:
+
+```text
+i-02b361873b71f41ab
+```
+
+Likewise, the VPC identifier changed.
+
+Nothing in the durable architecture depended on retaining the old IDs.
+
+The lasting artifact is:
+
+```text
+Terraform configuration
+```
+
+not:
+
+```text
+a particular VPC ID
+a particular subnet ID
+a particular instance ID
+```
+
+This established:
+
+```text
+resource IDs
+→ implementation details
+
+Terraform relationships
+→ architecture
+```
+
+---
+
+## Terraform Destroy vs. Manual Teardown
+
+Sprint 8 manual teardown required careful human ordering.
+
+Terraform destroy used the dependency graph already encoded in configuration and state.
+
+The contrast was:
+
+```text
+Manual teardown
+→ operator reasons about dependency order
+
+Terraform destroy
+→ dependency graph determines order
+```
+
+Manual understanding was still valuable because it made Terraform's behavior understandable rather than magical.
+
+But once encoded correctly, repeated teardown no longer required manually reconstructing the dependency tree.
+
+---
+
+## Source of Truth
+
+By the end of the sprint:
+
+```text
+network topology
+security relationships
+IAM relationships
+compute configuration
+database configuration
+load balancing
+monitoring
+alerting
+runtime secret path
+application bootstrap
+```
+
+were all represented in repository-controlled configuration.
+
+This changed the operational model from:
+
+```text
+remember how the environment was created
+```
+
+to:
+
+```text
+read and apply the configuration
+```
+
+That is one of the most important practical benefits of Infrastructure as Code.
+
+---
+
+## Current Limitations
+
+Sprint 9 improved reproducibility, but the environment is intentionally not presented as production-complete.
+
+Current limitations include:
+
+```text
+local Terraform state
+no shared remote-state locking
+single EC2 application instance
+EC2 in a public subnet
+Single-AZ RDS
+HTTP rather than HTTPS
+no Auto Scaling Group
+no WAF
+no centralized application logging
+user-data based configuration
+mutable supporting image tags
+human SNS email confirmation
+no automated alert-email validation yet
+```
+
+These limitations define future engineering work.
+
+They do not invalidate the Sprint 9 objective, which was reproducible infrastructure rather than complete production hardening.
+
+---
+
+## Cost Awareness
+
+The destroy/recreate experiment also reinforced the cost model.
+
+Resources such as:
+
+```text
+Application Load Balancer
+RDS
+EC2
+public IPv4
+storage
+```
+
+can continue generating charges while the environment remains active.
+
+Terraform now provides a cleaner lab lifecycle:
+
+```text
+terraform apply
+        ↓
+learn / test / demonstrate
+        ↓
+document evidence
+        ↓
+terraform destroy
+```
+
+This is easier to repeat safely than manually locating and deleting many individual resources.
+
+Cost remains an operational concern alongside security and reliability.
+
+---
+
+## Key Engineering Lessons
+
+* Infrastructure as Code is stronger when it follows manual understanding rather than replacing understanding.
+* Terraform configuration, Terraform state, and real infrastructure are different concepts.
+* An AWS resource existing does not mean Terraform manages it.
+* Terraform does not automatically adopt matching manually created resources.
+* Resource references encode architecture and build the dependency graph.
+* AWS-generated identifiers should not become durable application configuration.
+* Terraform can retain successfully created resources after a partial apply failure.
+* A second apply can converge on the missing desired state.
+* `terraform plan` is a prediction, not an execution.
+* `terraform destroy` is required to actually remove managed resources.
+* A clean empty state followed by `39 to add` is strong reproducibility evidence.
+* A second apply creating different AWS IDs proves that physical resource identity is replaceable.
+* Sensitive values require more than display redaction when state exposure matters.
+* Ephemeral variables and write-only provider arguments improve secret handling.
+* Runtime secrets can be delivered through SSM instead of embedded directly in EC2 user data.
+* Existing repository-owned migration and Nginx configuration should be reused rather than duplicated.
+* Terraform should create a usable application environment when reproducibility is the goal, not merely empty infrastructure.
+* EC2 `running` is not equivalent to application readiness.
+* Systems Manager `Online` is not equivalent to Nginx or backend readiness.
+* Cloud-init, Docker state, local health checks, and ALB target health provide different operational signals.
+* A temporarily unhealthy load-balancer target does not automatically imply a networking or security-group problem.
+* Evidence should be gathered before infrastructure is modified.
+* Destroy and recreation testing can expose hidden manual dependencies that a single successful deployment may not reveal.
+* Terraform makes repeated cost-conscious lab creation and removal practical.
+
+---
+
+## Sprint 9 Outcome
+
+Sprint 8 produced:
+
+```text
+manually understood AWS infrastructure
+```
+
+Sprint 9 converted that understanding into:
+
+```text
+declarative
+version-controlled
+dependency-aware
+destroyable
+recreatable
+Terraform-managed infrastructure
+```
+
+The strongest Sprint 9 evidence was:
+
+```text
+terraform apply
+        ↓
+working environment
+        ↓
+terraform plan
+        ↓
+no changes
+        ↓
+terraform destroy
+        ↓
+39 resources destroyed
+        ↓
+terraform state list
+        ↓
+empty
+        ↓
+terraform plan
+        ↓
+39 to add
+        ↓
+terraform apply
+        ↓
+new VPC
+new EC2
+new supporting resources
+        ↓
+ALB target healthy
+        ↓
+terraform plan
+        ↓
+no changes
+```
+
+The project therefore no longer depends on one particular set of AWS resource identifiers or a remembered sequence of console operations.
+
+The desired AWS environment is now encoded as infrastructure configuration.
+
+Sprint 8 established:
+
+```text
+understanding
+```
+
+Sprint 9 established:
+
+```text
+reproducibility
+```

@@ -18,3 +18,18 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+
+# Local Terraform variable files
+*.tfvars
+*.tfvars.json
+
+# Keep example variable files
+!*.tfvars.example

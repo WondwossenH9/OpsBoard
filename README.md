@@ -23,57 +23,97 @@ The goal is to understand and demonstrate how an application is:
 
 ## Current Status
 
-**Sprint 8 — AWS Deployment & Observability**
+**Sprint 9 — Terraform Infrastructure as Code**
 
-OpsBoard has progressed from a locally reproducible container release into a working AWS deployment with network isolation, load balancing, managed database infrastructure, native AWS observability, and alerting.
+OpsBoard has progressed from a manually provisioned AWS deployment into a Terraform-managed, reproducible infrastructure environment.
 
-The deployed platform now includes:
+Sprint 8 established the AWS architecture manually so that networking, security boundaries, compute, database connectivity, load balancing, observability, failure modes, and recovery behavior were understood before automation.
 
-- **Application Load Balancer** — public HTTP entry point and target health checking
+Sprint 9 encoded that architecture declaratively with Terraform.
+
+The platform now includes Terraform-managed:
+
+- **Amazon VPC** — dedicated application network
+- **Public subnets** — Application Load Balancer and EC2 placement
+- **Private database subnets** — isolated RDS placement
+- **Internet Gateway and route tables** — controlled network routing
+- **Security Groups** — tier-specific traffic boundaries
+- **IAM role and instance profile** — EC2 permissions and Systems Manager access
+- **AWS Systems Manager Parameter Store** — runtime database secret delivery
 - **EC2** — Docker application host
-- **Nginx** — reverse proxy running on EC2
-- **Gunicorn** — production WSGI server
-- **Flask** — backend REST API
 - **Amazon RDS MySQL 8.0** — private managed database
-- **AWS Systems Manager Session Manager** — administrative access without inbound SSH
-- **CloudWatch** — infrastructure metrics and alarms
-- **Amazon SNS** — email notification delivery
-- **GitHub Container Registry** — immutable backend deployment artifact
-- **GitHub Actions** — CI and image publication pipeline
+- **Application Load Balancer** — public entry point and application health checks
+- **CloudWatch alarms** — infrastructure and application monitoring
+- **Amazon SNS** — email alert delivery
+- **Automated EC2 user-data bootstrap** — Docker installation, secret retrieval, database migration, and application startup
 
-The release artifact deployed to AWS is the same SHA-tagged backend image produced by the Sprint 7 CI/CD pipeline.
+The deployment continues to use the immutable SHA-tagged backend image produced by the Sprint 7 CI/CD pipeline rather than rebuilding application source on EC2.
 
 OpsBoard now demonstrates:
 
 ```text
 Source change
     ↓
-Automated validation
+Automated CI validation
     ↓
-Versioned container artifact
+Immutable container artifact
+    ↓
+Terraform infrastructure
+    ↓
+Automated EC2 bootstrap
     ↓
 AWS deployment
     ↓
-Health monitoring
+Application health monitoring
     ↓
-Failure detection
+Failure detection and diagnosis
     ↓
-Alerting
+Destroy
     ↓
-Diagnosis
+Recreate
     ↓
-Recovery
+Same working architecture
 ```
 
-Detailed Sprint 8 architecture, failure testing, CloudWatch observations, and operational lessons are documented in:
+Sprint 9 explicitly verified reproducibility:
+
+```text
+terraform apply
+        ↓
+working environment
+        ↓
+terraform plan
+        ↓
+zero drift
+        ↓
+terraform destroy
+        ↓
+39 resources removed
+        ↓
+terraform state
+        ↓
+empty
+        ↓
+terraform apply
+        ↓
+new AWS resource IDs
+        ↓
+same healthy OpsBoard environment
+```
+
+The first and second Terraform deployments received different AWS-generated VPC and EC2 identifiers, demonstrating that the configuration—not manually remembered resource IDs—is the durable source of truth.
+
+Detailed documentation is available in:
 
 ```text
 docs/aws-deployment.md
+docs/terraform-deployment.md
+docs/engineering-journal.md
 ```
 
-The next major phase is reproducing the manually created AWS infrastructure with Terraform.
+Sprint 8 documents the manually provisioned AWS architecture and operational experiments.
 
----
+Sprint 9 documents the Terraform conversion, automated application bootstrap, secret handling, partial-apply recovery, destroy/recreate test, and final convergence verification.
 
 ## Current Architecture
 
@@ -926,6 +966,20 @@ opsboard/
 
 ---
 
+### Infrastructure as Code
+
+- Terraform 1.16.x
+- HashiCorp AWS Provider 6.69.x
+- Declarative AWS resource dependencies
+- Terraform state management
+- Provider dependency locking
+- Terraform variables and secret hygiene
+- Write-only and ephemeral database secret handling
+- EC2 user-data templating
+- Automated application bootstrap
+- Infrastructure destroy and recreation testing
+- Drift verification with `terraform plan`
+
 ## Engineering Approach
 
 OpsBoard is intentionally developed using the following cycle:
@@ -992,16 +1046,27 @@ The engineering journal documents those failures, decisions, and lessons in deta
 - CloudWatch alarms
 - Amazon SNS email notifications
 - AWS cost monitoring and budget controls
+- Terraform AWS infrastructure modeling
+- Terraform-managed VPC, networking, IAM, security groups, EC2, RDS, ALB, CloudWatch, SNS, and SSM Parameter Store
+- Automated EC2 application bootstrap
+- Runtime secret retrieval from SSM Parameter Store
+- Terraform-managed database migration
+- Clean Terraform destroy and recreation test
+- Zero-drift Terraform verification
 
 ### Next
 
 ```text
-Terraform Infrastructure as Code
+Remote Terraform state
       ↓
-Reproducible AWS environment
-      ↓
-Kubernetes
+State locking and team-safe workflows
       ↓
 Centralized application logging
       ↓
-HTTPS and production hardening
+HTTPS and TLS
+      ↓
+Auto Scaling / high availability
+      ↓
+Kubernetes
+      ↓
+Production hardening

@@ -2,6 +2,597 @@
 
 All notable changes to OpsBoard are documented in this file.
 
+## v0.8.0 — Terraform Infrastructure as Code
+
+### Added
+
+- Terraform infrastructure configuration under `infrastructure/terraform/`.
+- Terraform `1.16.x` compatibility requirements.
+- HashiCorp AWS Provider `6.69.x`.
+- Provider dependency locking through `.terraform.lock.hcl`.
+- Terraform-managed AWS networking:
+  - dedicated VPC using `10.0.0.0/16`;
+  - two public subnets across separate Availability Zones;
+  - two private database subnets across separate Availability Zones;
+  - Internet Gateway;
+  - public route table;
+  - private database route table;
+  - subnet route-table associations.
+- Terraform-managed security groups for:
+  - Application Load Balancer;
+  - EC2 application host;
+  - Amazon RDS.
+- Standalone Terraform security-group rule resources for:
+  - public HTTP to the ALB;
+  - ALB HTTP to EC2;
+  - EC2 MySQL access to RDS;
+  - outbound traffic.
+- Terraform-managed IAM resources:
+  - EC2 trust policy;
+  - `OpsBoardEC2Role`;
+  - `AmazonSSMManagedInstanceCore` attachment;
+  - EC2 instance profile;
+  - least-privilege runtime secret policy.
+- Terraform-managed EC2 application host.
+- Terraform-managed private Amazon RDS MySQL database.
+- Terraform-managed RDS subnet group.
+- Terraform-managed Application Load Balancer.
+- Terraform-managed target group and health check.
+- Terraform-managed ALB listener and EC2 target attachment.
+- Terraform-managed CloudWatch alarms.
+- Terraform-managed Amazon SNS alert topic and email subscription.
+- Terraform-managed SSM Parameter Store database secret.
+- EC2 user-data bootstrap template.
+- Terraform variable example file.
+- Dedicated Terraform deployment documentation in `docs/terraform-deployment.md`.
+
+### Infrastructure as Code
+
+Converted the AWS architecture manually established in Sprint 8 into Terraform configuration.
+
+The infrastructure lifecycle is now driven by:
+
+```text
+Terraform configuration
+        ↓
+dependency graph
+        ↓
+AWS resources
+```
+
+AWS-generated resource IDs are referenced through Terraform relationships rather than manually copied between resources.
+
+Examples include:
+
+```text
+VPC
+ ↓
+subnets
+ ↓
+route tables
+ ↓
+security groups
+ ↓
+EC2 / RDS / ALB
+```
+
+Terraform also passes generated infrastructure values such as the RDS endpoint into the EC2 application bootstrap automatically.
+
+### Network Architecture
+
+Terraform reproduces the Sprint 8 network design:
+
+```text
+Internet
+    ↓
+Application Load Balancer
+    ↓
+EC2
+    ↓
+Amazon RDS MySQL
+```
+
+The VPC uses:
+
+```text
+10.0.0.0/16
+```
+
+with:
+
+```text
+Public A      10.0.1.0/24
+Public B      10.0.2.0/24
+Private DB A  10.0.11.0/24
+Private DB B  10.0.12.0/24
+```
+
+The database subnets have no Internet default route.
+
+No NAT Gateway is used in the current cost-conscious learning environment.
+
+### Security
+
+Preserved the Sprint 8 tiered security model:
+
+```text
+Internet
+    ↓ TCP 80
+ALB Security Group
+    ↓ TCP 80
+EC2 Security Group
+    ↓ TCP 3306
+RDS Security Group
+```
+
+The application host does not expose inbound SSH.
+
+Administrative access remains available through AWS Systems Manager.
+
+EC2 uses IMDSv2 with metadata tokens required.
+
+The root EBS volume is encrypted.
+
+RDS storage is encrypted and the database remains publicly inaccessible.
+
+### Secret Management
+
+Introduced Terraform secret handling that avoids embedding the database password directly in EC2 user data.
+
+The password flow is:
+
+```text
+local Terraform variable
+        ↓
+ephemeral sensitive value
+        ├────────→ RDS write-only password
+        |
+        └────────→ SSM SecureString write-only value
+                          ↓
+                    EC2 IAM role
+                          ↓
+                    ssm:GetParameter
+                          ↓
+                runtime environment file
+```
+
+The database-password Terraform variable is:
+
+```text
+sensitive
+ephemeral
+```
+
+RDS and SSM Parameter Store use write-only provider arguments.
+
+The real `terraform.tfvars` file is excluded from Git.
+
+The repository contains only:
+
+```text
+terraform.tfvars.example
+```
+
+with placeholder values.
+
+### Automated EC2 Bootstrap
+
+Added `user-data.sh.tftpl` so a newly created EC2 instance can configure the OpsBoard runtime without manual SSH or Session Manager installation steps.
+
+The bootstrap automatically:
+
+```text
+installs Docker
+        ↓
+installs AWS CLI if required
+        ↓
+creates protected configuration storage
+        ↓
+retrieves DB password from SSM
+        ↓
+creates backend runtime environment
+        ↓
+restores SQL migration
+        ↓
+restores Nginx configuration
+        ↓
+creates Docker network
+        ↓
+pulls immutable backend image
+        ↓
+pulls Nginx and MySQL client images
+        ↓
+applies database migration
+        ↓
+starts backend
+        ↓
+starts Nginx
+        ↓
+checks local application health
+```
+
+Bootstrap output is recorded in:
+
+```text
+/var/log/opsboard-bootstrap.log
+```
+
+Shell tracing is deliberately disabled to avoid leaking runtime secrets into logs.
+
+### Immutable Deployment Artifact
+
+The Terraform deployment reuses the existing Sprint 7 backend artifact rather than rebuilding application source on EC2.
+
+The backend is deployed using its immutable Git commit SHA tag:
+
+```text
+ghcr.io/wondwossenh9/opsboard-backend:<git-commit-sha>
+```
+
+Unauthenticated registry access to the release artifact was verified before relying on it during fresh EC2 bootstrap.
+
+This preserves:
+
+```text
+Build once
+    ↓
+publish
+    ↓
+deploy the same artifact
+```
+
+### Database Migration
+
+The existing repository migration:
+
+```text
+db/migrations/001_create_incidents.sql
+```
+
+is reused by the Terraform bootstrap.
+
+Terraform reads the version-controlled migration and supplies it to EC2 rather than maintaining a second infrastructure-specific schema definition.
+
+The bootstrap retries migration because RDS resource creation does not guarantee immediate application readiness.
+
+A successful migration is required before the backend starts.
+
+### Configuration Reuse
+
+Terraform also reuses the existing:
+
+```text
+nginx/nginx.conf
+```
+
+configuration.
+
+The migration and Nginx configuration are passed through the user-data template from their repository-owned source files.
+
+This avoids maintaining duplicate deployment configuration.
+
+### Monitoring and Alerting
+
+Terraform now manages the Sprint 8 monitoring resources:
+
+```text
+ALB unhealthy target alarm
+EC2 status-check failure alarm
+RDS low-storage alarm
+SNS alert topic
+SNS email subscription
+```
+
+The ALB unhealthy-target alarm publishes both failure and recovery transitions to SNS.
+
+The email address remains a local Terraform input rather than a hardcoded repository value.
+
+### Partial Apply Recovery
+
+The first Terraform apply encountered an SNS subscription error because the supplied email value was rejected by AWS.
+
+Terraform had already created the other successful resources.
+
+The failure demonstrated that Terraform apply is not an all-or-nothing transactional rollback.
+
+The recovery sequence was:
+
+```text
+initial apply
+    ↓
+most resources created
+    ↓
+SNS subscription rejected
+    ↓
+successful resources retained in state
+    ↓
+input corrected
+    ↓
+terraform apply
+    ↓
+1 resource added
+0 changed
+0 destroyed
+```
+
+Terraform converged without rebuilding the already-correct infrastructure.
+
+### Convergence Verification
+
+After the first successful deployment:
+
+```text
+terraform plan
+```
+
+reported:
+
+```text
+No changes. Your infrastructure matches the configuration.
+```
+
+This verified alignment between:
+
+```text
+Terraform configuration
+Terraform state
+real AWS infrastructure
+```
+
+at that point in time.
+
+### Destroy Verification
+
+Terraform produced:
+
+```text
+Plan: 0 to add, 0 to change, 39 to destroy.
+```
+
+The environment was then deliberately destroyed.
+
+Final result:
+
+```text
+Destroy complete! Resources: 39 destroyed.
+```
+
+Afterward:
+
+```text
+terraform state list
+```
+
+returned no managed resources.
+
+A fresh plan then reported:
+
+```text
+Plan: 39 to add, 0 to change, 0 to destroy.
+```
+
+This proved that the infrastructure could be removed completely while its desired state remained encoded in Terraform.
+
+### Reproducibility Verification
+
+The complete environment was created again from the empty Terraform state.
+
+The recreated environment received different AWS-generated identities.
+
+First Terraform deployment:
+
+```text
+VPC → vpc-0f592ca583c27082c
+EC2 → i-055886e195cd03b15
+```
+
+Second Terraform deployment:
+
+```text
+VPC → vpc-080e125e9f9dcfacc
+EC2 → i-02b361873b71f41ab
+```
+
+This demonstrated:
+
+```text
+same configuration
+        ↓
+different physical resources
+        ↓
+same architecture
+```
+
+The second deployment's ALB target ultimately returned:
+
+```text
+healthy
+```
+
+and Terraform again reported:
+
+```text
+No changes. Your infrastructure matches the configuration.
+```
+
+### Readiness Investigation
+
+During the recreated deployment, the ALB initially reported:
+
+```text
+Target.FailedHealthChecks
+unhealthy
+```
+
+The infrastructure was diagnosed before any configuration was changed.
+
+Evidence showed:
+
+```text
+EC2       → running
+SSM       → Online
+cloud-init → running
+```
+
+The bootstrap log also showed that:
+
+```text
+database password retrieval succeeded
+container images were pulled
+RDS migration succeeded
+backend startup had begun
+```
+
+The first health inspection occurred before Nginx startup had completed.
+
+No security-group change was required.
+
+After bootstrap completed:
+
+```text
+ALB target → healthy
+```
+
+This demonstrated:
+
+```text
+infrastructure exists
+        ≠
+application ready
+```
+
+and:
+
+```text
+EC2 running
+        ≠
+application health check ready
+```
+
+### Git and State Hygiene
+
+Terraform-generated and sensitive local files are excluded from version control:
+
+```text
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+```
+
+The repository retains:
+
+```text
+.terraform.lock.hcl
+terraform.tfvars.example
+```
+
+This separates reproducible configuration from local state and credentials.
+
+### Lessons
+
+- Terraform configuration, Terraform state, and real AWS infrastructure are related but distinct.
+- An AWS resource existing does not mean Terraform manages it.
+- Terraform does not automatically adopt manually created infrastructure based on names or tags.
+- Resource references build a dependency graph and remove the need to copy AWS IDs manually.
+- Values marked only `sensitive` can still exist in state; ephemeral and write-only values provide stronger secret handling where supported.
+- A failed apply can leave successfully created resources managed in state.
+- Rerunning Terraform after correcting the cause allows the environment to converge.
+- `terraform plan` returning no changes is evidence of convergence at that moment.
+- `terraform destroy` follows the dependency graph in reverse and can remove the environment without a manually ordered teardown procedure.
+- Infrastructure provisioning and application readiness are separate operational states.
+- Health checks, cloud-init state, bootstrap logs, Docker state, and Systems Manager provide different diagnostic evidence.
+- Security rules should not be changed merely because a health check is temporarily failing.
+- Infrastructure as Code becomes substantially more convincing when destroy and clean recreation are actually tested.
+- AWS-generated resource identifiers should be treated as replaceable implementation details rather than durable configuration.
+
+### Current Limitations
+
+The Terraform deployment remains a learning and portfolio environment.
+
+Current limitations include:
+
+- Terraform state remains local.
+- Shared remote-state locking is not yet configured.
+- The application EC2 instance remains in a public subnet.
+- Only one application instance is deployed.
+- RDS remains Single-AZ.
+- HTTP is used instead of HTTPS.
+- There is no Auto Scaling Group.
+- Application logs are not yet centralized.
+- EC2 initialization still uses user data rather than image baking or dedicated configuration management.
+- Supporting container images still use mutable tags.
+- SNS email subscription confirmation remains a human step.
+- Alert-email input validation can be improved further.
+- No AWS WAF is configured.
+
+### Verified
+
+- Terraform successfully modeled the manually understood Sprint 8 AWS architecture.
+- Terraform created 39 AWS resources from an empty state.
+- IAM policy-document data sources were evaluated separately from provisioned AWS resources.
+- EC2 successfully registered with Systems Manager.
+- EC2 retrieved the database password from SSM Parameter Store.
+- The immutable backend image was successfully downloaded from GHCR.
+- Nginx and MySQL support images were successfully downloaded.
+- The SQL migration successfully executed against private Amazon RDS.
+- The ALB target became healthy after application bootstrap completed.
+- Terraform reported zero changes after deployment.
+- Terraform destroyed all 39 managed AWS resources.
+- Terraform state contained no managed resources after destruction.
+- Terraform correctly planned all 39 resources again from empty state.
+- The second apply created new AWS resource identities.
+- The recreated ALB target became healthy.
+- Terraform again reported zero changes after recreation.
+
+### Sprint Outcome
+
+Sprint 8 answered:
+
+> Can OpsBoard be deployed, secured, monitored, diagnosed, and recovered manually on AWS?
+
+Sprint 9 answered:
+
+> Can that understood architecture be encoded, destroyed, and recreated reproducibly from infrastructure configuration?
+
+The verified lifecycle is now:
+
+```text
+manual architecture understanding
+        ↓
+Terraform modeling
+        ↓
+terraform apply
+        ↓
+automated application bootstrap
+        ↓
+healthy AWS environment
+        ↓
+terraform plan
+        ↓
+zero drift
+        ↓
+terraform destroy
+        ↓
+39 resources removed
+        ↓
+empty state
+        ↓
+terraform apply
+        ↓
+new physical resources
+        ↓
+same architecture
+        ↓
+healthy target
+        ↓
+zero drift
+```
+
+OpsBoard has therefore progressed from manually provisioned cloud infrastructure to a reproducible Terraform-managed AWS environment.
+
 ## v0.7.0 — AWS Deployment & Observability
 
 ### Added
