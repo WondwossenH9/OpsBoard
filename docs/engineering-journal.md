@@ -4514,3 +4514,811 @@ Sprint 9 established:
 ```text
 reproducibility
 ```
+
+---
+
+# Sprint 10 — Remote Terraform State & Workflow Hardening
+
+## Sprint Objective
+
+Sprint 9 established that OpsBoard could be created, destroyed, and recreated from Terraform.
+
+Sprint 10 focused on the operational layer surrounding Terraform itself:
+
+```text
+Where does state live?
+How is it protected?
+How are concurrent operations controlled?
+How can an older state be recovered?
+How should Terraform changes be validated before merge?
+```
+
+The objective was to move from workstation-local Terraform state toward a safer, collaboration-ready workflow.
+
+---
+
+## Local State Limitation
+
+Before Sprint 10, the main Terraform state lived on the development workstation.
+
+This worked for the Sprint 9 learning environment, but introduced several risks:
+
+```text
+single-machine dependency
+multiple engineers could hold different state copies
+no shared lock
+limited recovery history
+state should not be committed to Git
+```
+
+The desired model became:
+
+```text
+Developer / CI
+      ↓
+Amazon S3
+├── state
+├── version history
+└── lock file
+      ↓
+AWS
+```
+
+---
+
+## Terraform Bootstrap Problem
+
+A remote backend introduces a dependency problem.
+
+Terraform needs the backend bucket before it can initialize the configuration that would create the bucket.
+
+Conceptually:
+
+```text
+bucket required
+    ↓
+terraform init
+    ↓
+terraform apply
+    ↓
+bucket created
+```
+
+This cycle was broken by creating a separate Terraform root:
+
+```text
+infrastructure/
+├── terraform-bootstrap/
+└── terraform/
+```
+
+The bootstrap root owns the state-storage infrastructure.
+
+The application root uses that infrastructure.
+
+This reinforced:
+
+```text
+one repository
+        ≠
+one Terraform state
+```
+
+---
+
+## Bootstrap Infrastructure
+
+The bootstrap root manages:
+
+```text
+aws_s3_bucket
+aws_s3_bucket_public_access_block
+aws_s3_bucket_versioning
+aws_s3_bucket_server_side_encryption_configuration
+```
+
+The first plan produced:
+
+```text
+Plan: 4 to add, 0 to change, 0 to destroy.
+```
+
+The bucket was configured with:
+
+```text
+public access blocked
+versioning enabled
+AES256 server-side encryption
+force_destroy = false
+prevent_destroy = true
+```
+
+---
+
+## Destroy Protection Test
+
+The bootstrap root was deliberately tested with:
+
+```bash
+terraform plan -destroy
+```
+
+Terraform showed the proposed four-resource destruction but then rejected the operation because the bucket uses:
+
+```text
+lifecycle.prevent_destroy
+```
+
+The result was:
+
+```text
+Error: Instance cannot be destroyed
+```
+
+This demonstrated the difference between:
+
+```text
+force_destroy = false
+```
+
+and:
+
+```text
+prevent_destroy = true
+```
+
+`prevent_destroy` is a Terraform lifecycle guardrail.
+
+`force_destroy = false` prevents Terraform from automatically deleting bucket contents in order to remove the bucket.
+
+---
+
+## Main State Before Migration
+
+The Sprint 9 AWS stack had already been destroyed.
+
+The main local state therefore contained:
+
+```text
+Resources: 0
+```
+
+but still had Terraform metadata including lineage and serial history.
+
+A manual backup was retained before changing backend configuration.
+
+The important distinction was:
+
+```text
+empty state
+        ≠
+no state metadata
+```
+
+---
+
+## S3 Backend Configuration
+
+The application Terraform root was updated with:
+
+```hcl
+backend "s3" {
+  key          = "opsboard/prod/terraform.tfstate"
+  region       = "us-east-1"
+  encrypt      = true
+  use_lockfile = true
+}
+```
+
+The bucket name was supplied during initialization rather than committed directly into the configuration.
+
+---
+
+## Migration Verification Problem
+
+After backend initialization, the first verification showed:
+
+```text
+Serial: 0
+Lineage:
+Resources: 0
+```
+
+and a direct S3 object lookup returned:
+
+```text
+404 Not Found
+```
+
+This was an important finding.
+
+A command appearing to complete successfully did not automatically prove that the expected state object had been persisted.
+
+The migration was therefore investigated rather than assumed to be correct.
+
+---
+
+## Remote State Baseline
+
+After recovery of the remote-state baseline, S3 contained the application state object.
+
+The new remote state had its own lineage and tracked:
+
+```text
+Resources: 0
+```
+
+The original Sprint 9 local backup also tracked:
+
+```text
+Resources: 0
+```
+
+Independent AWS checks confirmed that the application stack was absent.
+
+Therefore there was no Terraform resource ownership to recover from the old lineage.
+
+The decision was made not to force the historical lineage into the new remote state.
+
+The final relationship was:
+
+```text
+Terraform configuration → 39 desired resources
+remote state            → 0 managed resources
+AWS application stack   → absent
+```
+
+Terraform correctly reported:
+
+```text
+Plan: 39 to add, 0 to change, 0 to destroy.
+```
+
+---
+
+## S3 Native Locking
+
+The S3 backend uses:
+
+```hcl
+use_lockfile = true
+```
+
+No DynamoDB locking table was introduced.
+
+Terraform logging showed:
+
+```text
+Attempting to lock remote state
+Locked remote state
+Unlocked remote state
+```
+
+S3 version history also showed historical `.tflock` versions and delete markers.
+
+This proved that normal Terraform operations created and removed the native S3 lock file.
+
+---
+
+## First Lock Experiment
+
+An initial attempt used:
+
+```text
+terraform console
+```
+
+as the intended lock holder.
+
+A second Terraform plan still succeeded.
+
+No active `.tflock` object was observed.
+
+The experiment was therefore rejected as evidence.
+
+This was an important methodological lesson:
+
+```text
+expected behavior
+        ≠
+observed behavior
+```
+
+A test only counts when the evidence supports the conclusion.
+
+---
+
+## Deterministic Lock Contention Test
+
+A second experiment used a normal Terraform plan with logging enabled.
+
+The process was allowed to reach:
+
+```text
+Locked remote state
+```
+
+and was then paused with a Unix process signal.
+
+The process remained alive while retaining the state lock.
+
+A second terminal then ran:
+
+```bash
+terraform plan -lock-timeout=5s
+```
+
+Terraform returned:
+
+```text
+Error acquiring the state lock
+```
+
+with S3 reporting:
+
+```text
+412 PreconditionFailed
+```
+
+The second process also displayed lock ownership metadata.
+
+The first process was resumed and completed normally.
+
+Terraform released the lock.
+
+A later plan from the second terminal then succeeded.
+
+This established:
+
+```text
+writer A owns lock
+        ↓
+writer B blocked
+        ↓
+writer A completes
+        ↓
+lock released
+        ↓
+writer B succeeds
+```
+
+S3-native state locking was therefore proven experimentally.
+
+---
+
+## State Version Inspection
+
+When S3 object versions were first listed with the prefix:
+
+```text
+opsboard/prod/terraform.tfstate
+```
+
+the result included both:
+
+```text
+terraform.tfstate
+terraform.tfstate.tflock
+```
+
+because both keys share the same prefix.
+
+This initially made the output appear to contain many application state versions.
+
+The query was corrected to filter by exact object key.
+
+The lesson was:
+
+```text
+prefix match
+        ≠
+exact object match
+```
+
+Operational evidence must be interpreted, not merely collected.
+
+---
+
+## Recovery Lab Design
+
+The real application state was deliberately not used for the recovery experiment.
+
+A separate key was created:
+
+```text
+opsboard/labs/recovery.tfstate
+```
+
+The lab used:
+
+```text
+terraform_data
+```
+
+instead of AWS infrastructure.
+
+This allowed state behavior to be tested without creating billable resources or risking the real application state.
+
+---
+
+## Recovery Version 1
+
+The initial lab configuration contained:
+
+```text
+input = "version-1"
+```
+
+After apply, the state showed:
+
+```text
+Serial: 1
+Input: version-1
+```
+
+---
+
+## Recovery Version 2
+
+The configuration was changed to:
+
+```text
+input = "version-2"
+```
+
+A second apply produced a new S3 object version.
+
+The new state showed:
+
+```text
+Serial: 2
+Input: version-2
+```
+
+Both states retained the same Terraform lineage.
+
+This reinforced:
+
+```text
+lineage
+→ identity of the logical Terraform state
+
+serial
+→ generation within that state
+```
+
+---
+
+## Historical State Restoration
+
+The older S3 object version was restored as the newest S3 object.
+
+This created a new:
+
+```text
+S3 VersionId
+```
+
+whose contents still represented:
+
+```text
+Terraform Serial: 1
+Input: version-1
+```
+
+This demonstrated that:
+
+```text
+S3 object version
+        ≠
+Terraform state serial
+```
+
+The configuration still requested:
+
+```text
+version-2
+```
+
+Terraform plan therefore reported:
+
+```text
+version-1 → version-2
+```
+
+with:
+
+```text
+Plan: 0 to add, 1 to change, 0 to destroy.
+```
+
+This was direct evidence that the historical state had actually been restored.
+
+---
+
+## Recovery to Desired State
+
+Terraform apply was run normally.
+
+The state returned to:
+
+```text
+version-2
+```
+
+A final plan reported:
+
+```text
+No changes. Your infrastructure matches the configuration.
+```
+
+S3 contained multiple historical state versions representing the full experiment.
+
+The tested lifecycle was:
+
+```text
+version-1
+    ↓
+version-2
+    ↓
+restore version-1
+    ↓
+Terraform detects difference
+    ↓
+apply desired version-2
+    ↓
+No changes
+```
+
+---
+
+## Terraform CI
+
+A dedicated workflow was added:
+
+```text
+.github/workflows/terraform.yml
+```
+
+A matrix validates both roots:
+
+```text
+infrastructure/terraform
+infrastructure/terraform-bootstrap
+```
+
+Each job performs:
+
+```text
+terraform fmt -check -recursive
+terraform init -backend=false -input=false
+terraform validate -no-color
+```
+
+The use of:
+
+```text
+-backend=false
+```
+
+means CI validation does not require:
+
+```text
+AWS credentials
+S3 state access
+Terraform state locking
+AWS infrastructure access
+```
+
+This separates:
+
+```text
+configuration validation
+```
+
+from:
+
+```text
+infrastructure planning or deployment
+```
+
+---
+
+## Required Check Trigger Design
+
+After the Terraform matrix checks were added to branch protection, the workflow trigger design was reconsidered.
+
+The workflow originally used path filters.
+
+A required workflow skipped by path filtering can leave required checks without a successful result.
+
+The path filters were therefore removed.
+
+Terraform CI now runs on every pull request targeting `main`.
+
+This established another lesson:
+
+```text
+workflow trigger design
+        +
+branch protection design
+        =
+one combined control
+```
+
+A workflow cannot be evaluated only in isolation once its checks become required merge gates.
+
+---
+
+## Pull Request Verification
+
+Pull Request #16 ran:
+
+```text
+backend-ci
+integration-tests
+terraform-ci (infrastructure/terraform)
+terraform-ci (infrastructure/terraform-bootstrap)
+```
+
+All required checks passed.
+
+The image publication job remained skipped on the pull request, as designed.
+
+---
+
+## Post-Merge Verification
+
+Pull Request #16 was merged into `main`.
+
+Merge commit:
+
+```text
+808abfd8cc91190079fec75ed23ac08bf14d3d6f
+```
+
+The push to `main` triggered both application and Terraform CI.
+
+Results:
+
+```text
+backend-ci                                      → success
+integration-tests                               → success
+publish-image                                   → success
+terraform-ci (infrastructure/terraform)         → success
+terraform-ci (infrastructure/terraform-bootstrap) → success
+```
+
+This verified that the workflows remained healthy after integration.
+
+---
+
+## AWS Authentication Expiry
+
+Several Terraform operations were interrupted because the AWS CLI login session expired.
+
+Terraform reported:
+
+```text
+No valid credential sources found
+login session has expired
+```
+
+Reauthentication with:
+
+```bash
+aws login --remote
+```
+
+restored access.
+
+The important distinction was:
+
+```text
+AWS authentication session expired
+        ≠
+AWS resources deleted
+        ≠
+S3 state deleted
+```
+
+Authentication controls client access.
+
+It does not determine the lifecycle of already-existing durable infrastructure.
+
+---
+
+## Final Application-State Verification
+
+After merging the backend configuration, the local Terraform working directory was reinitialized against the existing S3 backend.
+
+A final plan returned:
+
+```text
+Plan: 39 to add, 0 to change, 0 to destroy.
+```
+
+This remained the correct outcome:
+
+```text
+configuration → 39 resources
+remote state  → 0 resources
+AWS stack     → absent
+```
+
+No apply was performed.
+
+The application environment remains intentionally destroyed for cost control.
+
+---
+
+## Sprint 10 Lessons
+
+- Terraform state should be treated as operational data, not normal source code.
+- A repository can contain multiple Terraform roots with independent ownership and state.
+- Backend infrastructure introduces a bootstrap problem that must be solved deliberately.
+- S3 public-access blocking and encryption should be explicitly modeled.
+- Versioning provides recoverable state history.
+- `prevent_destroy` and `force_destroy` protect against different failure modes.
+- Successful `terraform init` is not sufficient evidence that the expected remote state exists.
+- State verification should use both Terraform and backend-side evidence.
+- Native S3 `.tflock` locking can prevent concurrent Terraform writers.
+- A failed lock attempt should be investigated before considering `force-unlock`.
+- A test that does not produce the expected evidence should not be counted as successful.
+- S3 prefix searches can mix state and lock objects.
+- S3 VersionIds and Terraform state serials are different concepts.
+- Recovery testing should use an isolated state whenever possible.
+- `terraform init -backend=false` allows safe Terraform CI validation without AWS credentials.
+- Required status checks must be designed together with workflow triggers.
+- AWS authentication-session expiry does not destroy infrastructure or state.
+- An empty state can still contain lineage and serial metadata.
+- Evidence-driven troubleshooting is more reliable than assumptions about how a tool should behave.
+
+---
+
+## Sprint 10 Outcome
+
+Sprint 8 established:
+
+```text
+manual AWS understanding
+```
+
+Sprint 9 established:
+
+```text
+Terraform reproducibility
+```
+
+Sprint 10 established:
+
+```text
+remote application state
+        ↓
+state protection
+        ↓
+state locking
+        ↓
+state recovery
+        ↓
+Terraform CI
+        ↓
+required infrastructure merge gates
+```
+
+OpsBoard now demonstrates both Terraform infrastructure provisioning and safer Terraform state operations.
+
+The next major operations focus is:
+
+```text
+centralized application logging
+```
+
+followed by:
+
+```text
+HTTPS / TLS
+high availability
+Kubernetes
+production hardening
+```

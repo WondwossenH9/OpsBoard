@@ -8,114 +8,156 @@ The goal is not simply to build an application.
 
 The goal is to understand and demonstrate how an application is:
 
-- developed;
-- tested;
-- containerized;
-- networked;
-- configured;
-- persisted;
-- released;
-- operated;
-- diagnosed when it fails;
-- and progressively prepared for cloud and production environments.
+- developed
+- tested
+- containerized
+- networked
+- configured
+- persisted
+- released
+- operated
+- diagnosed when it fails
+- progressively prepared for cloud and production environments
 
 ---
 
 ## Current Status
 
-**Sprint 9 — Terraform Infrastructure as Code**
+**Sprint 10 — Remote Terraform State & Workflow Hardening**
 
-OpsBoard has progressed from a manually provisioned AWS deployment into a Terraform-managed, reproducible infrastructure environment.
+OpsBoard has progressed from reproducible Terraform-managed AWS infrastructure into a safer Terraform operating model with remote state, locking, recovery capability, and infrastructure-specific CI validation.
 
-Sprint 8 established the AWS architecture manually so that networking, security boundaries, compute, database connectivity, load balancing, observability, failure modes, and recovery behavior were understood before automation.
+Sprint 9 proved that the complete AWS environment could be created, destroyed, and recreated from Terraform. Sprint 10 hardened the Terraform workflow itself.
 
-Sprint 9 encoded that architecture declaratively with Terraform.
+The main OpsBoard infrastructure state is now stored remotely in a protected Amazon S3 backend with:
 
-The platform now includes Terraform-managed:
+- server-side encryption;
+- S3 versioning;
+- public-access blocking;
+- S3-native Terraform state locking;
+- historical state recovery capability.
 
-- **Amazon VPC** — dedicated application network
-- **Public subnets** — Application Load Balancer and EC2 placement
-- **Private database subnets** — isolated RDS placement
-- **Internet Gateway and route tables** — controlled network routing
-- **Security Groups** — tier-specific traffic boundaries
-- **IAM role and instance profile** — EC2 permissions and Systems Manager access
-- **AWS Systems Manager Parameter Store** — runtime database secret delivery
-- **EC2** — Docker application host
-- **Amazon RDS MySQL 8.0** — private managed database
-- **Application Load Balancer** — public entry point and application health checks
-- **CloudWatch alarms** — infrastructure and application monitoring
-- **Amazon SNS** — email alert delivery
-- **Automated EC2 user-data bootstrap** — Docker installation, secret retrieval, database migration, and application startup
-
-The deployment continues to use the immutable SHA-tagged backend image produced by the Sprint 7 CI/CD pipeline rather than rebuilding application source on EC2.
-
-OpsBoard now demonstrates:
+The repository now separates Terraform into two independent roots:
 
 ```text
-Source change
-    ↓
-Automated CI validation
-    ↓
-Immutable container artifact
-    ↓
-Terraform infrastructure
-    ↓
-Automated EC2 bootstrap
-    ↓
-AWS deployment
-    ↓
-Application health monitoring
-    ↓
-Failure detection and diagnosis
-    ↓
-Destroy
-    ↓
-Recreate
-    ↓
-Same working architecture
+infrastructure/
+├── terraform-bootstrap/
+│   └── creates and protects the remote-state infrastructure
+│
+└── terraform/
+    └── manages the OpsBoard AWS application infrastructure
 ```
 
-Sprint 9 explicitly verified reproducibility:
+This establishes a clear ownership boundary:
 
 ```text
-terraform apply
+Bootstrap Terraform
         ↓
-working environment
+owns state-storage infrastructure
+
+Application Terraform
         ↓
-terraform plan
+uses the remote backend
         ↓
-zero drift
-        ↓
-terraform destroy
-        ↓
-39 resources removed
-        ↓
-terraform state
-        ↓
-empty
-        ↓
-terraform apply
-        ↓
-new AWS resource IDs
-        ↓
-same healthy OpsBoard environment
+owns the OpsBoard AWS stack
 ```
 
-The first and second Terraform deployments received different AWS-generated VPC and EC2 identifiers, demonstrating that the configuration—not manually remembered resource IDs—is the durable source of truth.
+The main Terraform backend uses:
+
+```text
+Amazon S3
+├── terraform.tfstate
+├── historical object versions
+└── terraform.tfstate.tflock
+```
+
+Native S3 locking was tested with two concurrent Terraform processes. One process deliberately retained the lock while a second attempted to plan. The second operation was blocked with:
+
+```text
+Error acquiring the state lock
+412 PreconditionFailed
+```
+
+This demonstrated that concurrent writers cannot modify the same Terraform state simultaneously.
+
+State recovery was also tested in an isolated S3-backed Terraform lab:
+
+```text
+state version 1
+        ↓
+state version 2
+        ↓
+restore historical version 1
+        ↓
+Terraform detects version-1 → version-2
+        ↓
+apply desired configuration
+        ↓
+No changes
+```
+
+Terraform validation is now integrated into GitHub Actions. Every pull request to `main` runs independent validation for:
+
+```text
+infrastructure/terraform-bootstrap
+infrastructure/terraform
+```
+
+Each Terraform CI job performs:
+
+```text
+terraform fmt -check
+        ↓
+terraform init -backend=false
+        ↓
+terraform validate
+```
+
+This validation requires no AWS credentials, does not access the remote application state, and does not create infrastructure.
+
+The protected `main` branch now requires:
+
+```text
+backend-ci
+integration-tests
+terraform-ci (infrastructure/terraform)
+terraform-ci (infrastructure/terraform-bootstrap)
+```
+
+before a pull request can merge.
+
+The application AWS environment is currently intentionally destroyed for cost control. The remote application state therefore tracks zero managed application resources while the Terraform configuration still defines the complete 39-resource environment.
+
+A verified Terraform plan currently produces:
+
+```text
+Plan: 39 to add, 0 to change, 0 to destroy.
+```
+
+This means the application environment is absent, but the infrastructure definition and remote state foundation remain ready for reconstruction.
+
+The bootstrap root remains a separate Terraform state owner. Its state is currently local and is protected from accidental bucket destruction through Terraform lifecycle controls.
 
 Detailed documentation is available in:
 
 ```text
 docs/aws-deployment.md
 docs/terraform-deployment.md
+docs/terraform-remote-state.md
 docs/engineering-journal.md
 ```
 
 Sprint 8 documents the manually provisioned AWS architecture and operational experiments.
 
-Sprint 9 documents the Terraform conversion, automated application bootstrap, secret handling, partial-apply recovery, destroy/recreate test, and final convergence verification.
+Sprint 9 documents the Terraform conversion, automated application bootstrap, secret handling, partial-apply recovery, destroy/recreate experiment, and convergence verification.
 
-## Current Architecture
+Sprint 10 documents remote application state, S3 locking, state versioning, recovery testing, Terraform CI, and protected infrastructure workflow controls.
+
+---
+
+## AWS Architecture (When Deployed)
+
+The application stack is currently destroyed for cost control. When provisioned from Terraform, OpsBoard uses the following architecture:
 
 ```text
                          Internet
@@ -187,7 +229,7 @@ Only traffic arriving through the Application Load Balancer can reach Nginx on E
 
 ## AWS Observability
 
-OpsBoard uses native AWS telemetry across each infrastructure tier.
+When the AWS application stack is deployed, OpsBoard uses native AWS telemetry across each infrastructure tier.
 
 ### Application Load Balancer
 
@@ -231,7 +273,7 @@ CPUSurplusCreditsCharged
 SwapUsage
 ```
 
-CloudWatch alarms currently monitor:
+Terraform configures CloudWatch alarms to monitor:
 
 ```text
 ALB unhealthy target
@@ -239,7 +281,7 @@ EC2 status-check failure
 RDS low free storage
 ```
 
-The ALB availability alarm publishes state changes through Amazon SNS to an email subscriber.
+When deployed, the ALB availability alarm publishes state changes through Amazon SNS to an email subscriber.
 
 The complete path has been deliberately tested:
 
@@ -265,13 +307,15 @@ CloudWatch OK
 SNS recovery action
 ```
 
-This verifies not only deployment availability, but also detection and recovery behavior.
+This experiment verified not only deployment availability, but also detection and recovery behavior.
 
 ---
 
 ## CI/CD Architecture
 
 Changes are developed through feature branches and pull requests.
+
+Every pull request to `main` must pass application and infrastructure validation:
 
 ```text
 Developer
@@ -280,33 +324,49 @@ Feature Branch
     ↓
 Pull Request
     ↓
-┌─────────────────────┐
-│ backend-ci          │
-│ integration-tests   │
-└─────────────────────┘
+┌──────────────────────────────────────────────────┐
+│ backend-ci                                       │
+│ integration-tests                                │
+│ terraform-ci (infrastructure/terraform)          │
+│ terraform-ci (infrastructure/terraform-bootstrap)│
+└──────────────────────────────────────────────────┘
     ↓
-Required checks pass
+All required checks pass
     ↓
 Protected main
 ```
 
-Pull requests run CI but do not publish release artifacts.
+The Terraform jobs validate configuration without connecting to the live S3 backend:
 
-After a successful merge:
+```text
+terraform fmt -check
+        ↓
+terraform init -backend=false
+        ↓
+terraform validate
+```
+
+This allows infrastructure syntax and configuration validation without exposing AWS credentials to routine pull-request CI.
+
+Pull requests do not publish release container artifacts.
+
+After a successful merge, both workflows run on `main`:
 
 ```text
 Push to main
-    ↓
-backend-ci
-    +
-integration-tests
-    ↓
-both succeed
-    ↓
-publish-image
-    ↓
-GitHub Container Registry
+    ├── OpsBoard CI
+    │     ├── backend-ci
+    │     ├── integration-tests
+    │     └── publish-image
+    │           ↓
+    │        GitHub Container Registry
+    │
+    └── Terraform CI
+          ├── terraform-ci (infrastructure/terraform)
+          └── terraform-ci (infrastructure/terraform-bootstrap)
 ```
+
+`publish-image` is gated by `backend-ci` and `integration-tests`. Terraform CI runs independently to validate the infrastructure configuration on `main`.
 
 The backend image is published as:
 
@@ -321,6 +381,24 @@ ghcr.io/wondwossenh9/opsboard-backend:latest
 ```
 
 The commit-SHA tag provides traceability between source code and the released container artifact.
+
+Terraform validation remains separate from Terraform deployment. The current CI workflow performs:
+
+```text
+fmt
+init without backend
+validate
+```
+
+but does not automatically perform:
+
+```text
+terraform plan
+terraform apply
+terraform destroy
+```
+
+against AWS.
 
 ---
 
@@ -373,6 +451,31 @@ The GitHub Actions runner communicates with the service through:
 ```
 
 The integration tests create controlled database state, seed known test records, execute API requests, and clean up afterward.
+
+---
+
+### `terraform-ci`
+
+Validates both Terraform roots on every pull request to `main` and on pushes to `main`.
+
+A matrix runs the same checks against:
+
+```text
+infrastructure/terraform
+infrastructure/terraform-bootstrap
+```
+
+Each matrix job performs:
+
+```text
+terraform fmt -check -recursive
+terraform init -backend=false -input=false
+terraform validate -no-color
+```
+
+The workflow deliberately uses `-backend=false`, so routine CI validation does not require AWS credentials and does not access the live S3 backend.
+
+The two matrix jobs are required status checks on the protected `main` branch.
 
 ---
 
@@ -457,13 +560,17 @@ The following checks must pass before a pull request can be merged:
 ```text
 backend-ci
 integration-tests
+terraform-ci (infrastructure/terraform)
+terraform-ci (infrastructure/terraform-bootstrap)
 ```
 
-This means CI is not merely advisory.
+This means both application code and Terraform infrastructure configuration are protected by required CI gates.
+
+Terraform CI runs for every pull request targeting `main`. This is intentional because required GitHub status checks must reliably report a result rather than being skipped by path filtering.
 
 A failed required check prevents the change from entering `main`.
 
-The release job is intentionally not required on pull requests because publishing only occurs after merge.
+The release image-publishing job is intentionally not required on pull requests because publication occurs only after a successful merge to `main`.
 
 ---
 
@@ -871,7 +978,8 @@ opsboard/
 │
 ├── .github/
 │   └── workflows/
-│       └── ci.yml
+│       ├── ci.yml
+│       └── terraform.yml
 │
 ├── backend/
 │   ├── app.py
@@ -891,9 +999,38 @@ opsboard/
 │
 ├── frontend/
 │
+├── infrastructure/
+│   ├── terraform-bootstrap/
+│   │   ├── .terraform.lock.hcl
+│   │   ├── main.tf
+│   │   ├── outputs.tf
+│   │   ├── providers.tf
+│   │   ├── terraform.tfvars.example
+│   │   ├── variables.tf
+│   │   └── versions.tf
+│   │
+│   └── terraform/
+│       ├── .terraform.lock.hcl
+│       ├── compute.tf
+│       ├── database.tf
+│       ├── iam.tf
+│       ├── load-balancer.tf
+│       ├── monitoring.tf
+│       ├── networking.tf
+│       ├── parameters.tf
+│       ├── providers.tf
+│       ├── security.tf
+│       ├── terraform.tfvars.example
+│       ├── user-data.sh.tftpl
+│       ├── variables.tf
+│       └── versions.tf
+│
 ├── docs/
-|   ├── aws-deployment.md
-│   └── engineering-journal.md
+│   ├── README.md
+│   ├── aws-deployment.md
+│   ├── engineering-journal.md
+│   ├── terraform-deployment.md
+│   └── terraform-remote-state.md
 │
 ├── .env.example
 ├── .gitignore
@@ -936,6 +1073,8 @@ opsboard/
 - Docker build validation
 - GitHub Container Registry
 - SHA-tagged container releases
+- Terraform formatting and validation
+- Matrix validation for both Terraform roots
 
 ### Release Engineering
 
@@ -964,14 +1103,20 @@ opsboard/
 - Amazon SNS notifications
 - AWS Budgets
 
----
-
 ### Infrastructure as Code
 
 - Terraform 1.16.x
 - HashiCorp AWS Provider 6.69.x
 - Declarative AWS resource dependencies
-- Terraform state management
+- Separate bootstrap and application Terraform roots
+- Amazon S3 remote backend for application infrastructure state
+- S3 server-side encryption
+- S3 public-access blocking
+- S3 state versioning
+- S3-native Terraform state locking
+- Historical state recovery testing
+- Terraform state lifecycle protection
+- Remote-state verification
 - Provider dependency locking
 - Terraform variables and secret hygiene
 - Write-only and ephemeral database secret handling
@@ -979,6 +1124,9 @@ opsboard/
 - Automated application bootstrap
 - Infrastructure destroy and recreation testing
 - Drift verification with `terraform plan`
+- GitHub Actions Terraform validation
+- Credential-free `terraform init -backend=false`
+- Required Terraform pull-request checks
 
 ## Engineering Approach
 
@@ -1053,14 +1201,21 @@ The engineering journal documents those failures, decisions, and lessons in deta
 - Terraform-managed database migration
 - Clean Terraform destroy and recreation test
 - Zero-drift Terraform verification
+- Dedicated Terraform backend bootstrap root
+- Amazon S3 remote application state
+- S3 state encryption and public-access protection
+- S3 state versioning
+- S3-native Terraform state locking
+- Concurrent Terraform writer protection test
+- Historical Terraform state recovery drill
+- Independent remote-state and AWS verification
+- GitHub Actions Terraform formatting and validation
+- Separate validation for bootstrap and application Terraform roots
+- Required Terraform CI checks on protected `main`
 
 ### Next
 
 ```text
-Remote Terraform state
-      ↓
-State locking and team-safe workflows
-      ↓
 Centralized application logging
       ↓
 HTTPS and TLS
@@ -1070,3 +1225,4 @@ Auto Scaling / high availability
 Kubernetes
       ↓
 Production hardening
+```
