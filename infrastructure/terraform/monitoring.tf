@@ -1,3 +1,32 @@
+resource "aws_cloudwatch_log_group" "backend" {
+  name              = "/opsboard/backend"
+  retention_in_days = 7
+
+  tags = {
+    Name      = "opsboard-backend-logs"
+    Component = "backend"
+  }
+}
+
+resource "aws_cloudwatch_log_group" "nginx" {
+  name              = "/opsboard/nginx"
+  retention_in_days = 7
+
+  tags = {
+    Name      = "opsboard-nginx-logs"
+    Component = "nginx"
+  }
+}
+
+resource "aws_cloudwatch_log_group" "bootstrap" {
+  name              = "/opsboard/bootstrap"
+  retention_in_days = 7
+
+  tags = {
+    Name      = "opsboard-bootstrap-logs"
+    Component = "bootstrap"
+  }
+}
 resource "aws_sns_topic" "alerts" {
   name = "opsboard-alerts"
 

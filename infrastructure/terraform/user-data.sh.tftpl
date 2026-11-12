@@ -22,6 +22,60 @@ apt-get install -y \
 systemctl enable --now docker
 
 # ------------------------------------------------------------
+# Install Amazon CloudWatch Agent
+# ------------------------------------------------------------
+
+echo "[opsboard] installing CloudWatch Agent"
+
+curl -fsSL \
+  "https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb" \
+  -o /tmp/amazon-cloudwatch-agent.deb
+
+dpkg -i /tmp/amazon-cloudwatch-agent.deb
+
+rm -f /tmp/amazon-cloudwatch-agent.deb
+
+# ------------------------------------------------------------
+# Configure centralized host logging
+# ------------------------------------------------------------
+
+echo "[opsboard] configuring CloudWatch Agent"
+
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<EOF
+{
+  "agent": {
+    "region": "${aws_region}"
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/opsboard-bootstrap.log",
+            "log_group_name": "${bootstrap_log_group}",
+            "log_stream_name": "{instance_id}/opsboard-bootstrap"
+          },
+          {
+            "file_path": "/var/log/cloud-init-output.log",
+            "log_group_name": "${bootstrap_log_group}",
+            "log_stream_name": "{instance_id}/cloud-init-output"
+          }
+        ]
+      }
+    }
+  }
+}
+EOF
+
+echo "[opsboard] starting CloudWatch Agent"
+
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config \
+  -m ec2 \
+  -s \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+# ------------------------------------------------------------
 # Install AWS CLI v2 if it is not already available
 # ------------------------------------------------------------
 
@@ -192,6 +246,11 @@ echo "[opsboard] starting backend container"
 docker run -d \
   --name opsboard-backend \
   --restart unless-stopped \
+  --log-driver awslogs \
+  --log-opt awslogs-region="${aws_region}" \
+  --log-opt awslogs-group="${backend_log_group}" \
+  --log-opt awslogs-create-group=false \
+  --log-opt tag='backend-{{.ID}}' \
   --network opsboard-network \
   --network-alias backend \
   --env-file /etc/opsboard/backend.env \
@@ -211,6 +270,11 @@ echo "[opsboard] starting nginx container"
 docker run -d \
   --name opsboard-nginx \
   --restart unless-stopped \
+  --log-driver awslogs \
+  --log-opt awslogs-region="${aws_region}" \
+  --log-opt awslogs-group="${nginx_log_group}" \
+  --log-opt awslogs-create-group=false \
+  --log-opt tag='nginx-{{.ID}}' \
   --network opsboard-network \
   -p 80:80 \
   -v /etc/opsboard/nginx.conf:/etc/nginx/nginx.conf:ro \
