@@ -14,6 +14,9 @@ resource "aws_instance" "app" {
     db_user                    = var.db_username
     db_password_parameter_name = aws_ssm_parameter.db_password.name
     backend_image              = var.backend_image
+    backend_log_group          = aws_cloudwatch_log_group.backend.name
+    nginx_log_group            = aws_cloudwatch_log_group.nginx.name
+    bootstrap_log_group        = aws_cloudwatch_log_group.bootstrap.name
 
     migration_sql_b64 = base64encode(
       file("${path.module}/../../db/migrations/001_create_incidents.sql")
@@ -28,7 +31,8 @@ resource "aws_instance" "app" {
 
   depends_on = [
     aws_iam_role_policy_attachment.ssm_core,
-    aws_iam_role_policy.ec2_runtime_secrets
+    aws_iam_role_policy.ec2_runtime_secrets,
+    aws_iam_role_policy.ec2_cloudwatch_logs
   ]
 
   root_block_device {
