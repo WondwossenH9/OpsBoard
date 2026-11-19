@@ -53,3 +53,36 @@ resource "aws_iam_role_policy" "ec2_runtime_secrets" {
   role   = aws_iam_role.ec2.id
   policy = data.aws_iam_policy_document.ec2_runtime_secrets.json
 }
+
+data "aws_iam_policy_document" "ec2_cloudwatch_logs" {
+  statement {
+    effect = "Allow"
+
+    actions = [
+      "logs:CreateLogStream",
+      "logs:PutLogEvents"
+    ]
+
+    resources = [
+      "${aws_cloudwatch_log_group.backend.arn}:*",
+      "${aws_cloudwatch_log_group.nginx.arn}:*",
+      "${aws_cloudwatch_log_group.bootstrap.arn}:*"
+    ]
+  }
+
+  statement {
+    effect = "Allow"
+
+    actions = [
+      "logs:DescribeLogGroups"
+    ]
+
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "ec2_cloudwatch_logs" {
+  name   = "OpsBoardCloudWatchLogs"
+  role   = aws_iam_role.ec2.id
+  policy = data.aws_iam_policy_document.ec2_cloudwatch_logs.json
+}

@@ -1,9 +1,40 @@
+import json
+import logging
 import os
+import sys
+from datetime import datetime, timezone
 
 import mysql.connector
 from flask import Flask, jsonify
 
 app = Flask(__name__)
+
+# -------------------------------------------------------------------
+# Structured Application Logging
+# -------------------------------------------------------------------
+
+logger = logging.getLogger("opsboard")
+logger.setLevel(logging.INFO)
+logger.propagate = False
+
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+
+
+def log_event(level, event, message, **fields):
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "level": logging.getLevelName(level),
+        "service": "opsboard-backend",
+        "event": event,
+        "message": message,
+        **fields,
+    }
+
+    logger.log(level, json.dumps(payload))
+
 
 # -------------------------------------------------------------------
 # Application Configuration
@@ -31,7 +62,13 @@ APP_ENV = "development"
 # -------------------------------------------------------------------
 @app.errorhandler(mysql.connector.Error)
 def handle_database_error(error):
-    app.logger.error("Database error: %s", error)
+    log_event(
+        logging.ERROR,
+        "database_error",
+        "Database operation failed",
+        error_type=type(error).__name__,
+        error_code=getattr(error, "errno", None),
+    )
 
     return jsonify(
         {
