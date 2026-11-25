@@ -23,7 +23,16 @@ The goal is to understand and demonstrate how an application is:
 
 ## Current Status
 
-**Sprint 10 — Remote Terraform State & Workflow Hardening**
+**Sprint 11 — Centralized Application Logging**
+
+OpsBoard now sends backend and Nginx container logs to Amazon CloudWatch Logs through Docker's `awslogs` driver. The EC2 CloudWatch Agent is configured to collect bootstrap and cloud-init logs. Terraform manages the log groups and the EC2 permissions for log delivery.
+
+The Sprint 11 deployment created 43 AWS resources using a backend image pinned by digest. Two checks verified backend log delivery:
+
+- A tagged `GET /api/incidents` request returned `200 OK` through the Application Load Balancer, and the matching Gunicorn access log appeared in `/opsboard/backend`.
+- An isolated container on EC2 ran the same backend image with an unreachable database. `/api/health` returned `200`, `/api/incidents` returned `503`, and CloudWatch found the structured Flask `database_error` event.
+
+### Sprint 10 — Remote Terraform State & Workflow Hardening
 
 OpsBoard has progressed from reproducible Terraform-managed AWS infrastructure into a safer Terraform operating model with remote state, locking, recovery capability, and infrastructure-specific CI validation.
 
@@ -126,15 +135,7 @@ terraform-ci (infrastructure/terraform-bootstrap)
 
 before a pull request can merge.
 
-The application AWS environment is currently intentionally destroyed for cost control. The remote application state therefore tracks zero managed application resources while the Terraform configuration still defines the complete 39-resource environment.
-
-A verified Terraform plan currently produces:
-
-```text
-Plan: 39 to add, 0 to change, 0 to destroy.
-```
-
-This means the application environment is absent, but the infrastructure definition and remote state foundation remain ready for reconstruction.
+At the Sprint 10 checkpoint, the application stack had been torn down for cost control. The remote application state tracked zero managed resources, and a verified plan showed `39 to add, 0 to change, 0 to destroy`. Sprint 11 later recreated the application stack from a reviewed plan that added 43 resources.
 
 The bootstrap root remains a separate Terraform state owner. Its state is currently local and is protected from accidental bucket destruction through Terraform lifecycle controls.
 
@@ -157,7 +158,7 @@ Sprint 10 documents remote application state, S3 locking, state versioning, reco
 
 ## AWS Architecture (When Deployed)
 
-The application stack is currently destroyed for cost control. When provisioned from Terraform, OpsBoard uses the following architecture:
+The application stack is provisioned from Terraform for AWS labs and can be torn down between sessions to control costs. When deployed, OpsBoard uses the architecture below.
 
 ```text
                          Internet
@@ -230,6 +231,16 @@ Only traffic arriving through the Application Load Balancer can reach Nginx on E
 ## AWS Observability
 
 When the AWS application stack is deployed, OpsBoard uses native AWS telemetry across each infrastructure tier.
+
+### Centralized Application Logs
+
+| CloudWatch log group | Source |
+| --- | --- |
+| `/opsboard/backend` | Gunicorn access and runtime logs, plus structured Flask application errors |
+| `/opsboard/nginx` | Nginx container logs |
+| `/opsboard/bootstrap` | EC2 application bootstrap and cloud-init logs |
+
+Terraform configures seven-day retention for all three log groups. The backend log group was verified with a live request and an isolated database failure drill. The error drill ran the deployed image in a separate container on EC2 and used its own log stream, so it did not require stopping the live backend or RDS.
 
 ### Application Load Balancer
 
@@ -1212,12 +1223,12 @@ The engineering journal documents those failures, decisions, and lessons in deta
 - GitHub Actions Terraform formatting and validation
 - Separate validation for bootstrap and application Terraform roots
 - Required Terraform CI checks on protected `main`
+- Centralized CloudWatch logging for backend, Nginx, and EC2 bootstrap
+- Verified backend access logs and structured Flask error delivery in CloudWatch
 
 ### Next
 
 ```text
-Centralized application logging
-      ↓
 HTTPS and TLS
       ↓
 Auto Scaling / high availability

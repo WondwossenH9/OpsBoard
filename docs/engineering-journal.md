@@ -5322,3 +5322,35 @@ high availability
 Kubernetes
 production hardening
 ```
+---
+
+
+## Sprint 11 — Centralized Application Logging
+
+### Objective
+
+Verify that operators can trace a live request and find a structured application error in CloudWatch Logs.
+
+### Local Failure and Recovery
+
+With the local Docker Compose stack running, I stopped MySQL and sent requests through Nginx. `/api/incidents` returned `503 Service Unavailable`, while `/api/health` returned `200 OK`. Flask emitted a JSON `database_error` event with MySQL connector error code `2005`.
+
+After restarting MySQL, I waited for the container to become healthy and verified that `/api/incidents` returned `200` again.
+
+### AWS Deployment and Request Trace
+
+I reviewed and applied a Terraform plan that created 43 AWS resources. The EC2 deployment used the GHCR backend image built from merge commit `1580814`, pinned by digest.
+
+The first ALB request returned `502`. Later requests to `/api/health` and `/api/incidents` both returned `200`. The cause of the initial `502` was not established.
+
+I sent a uniquely tagged `GET /api/incidents` request and found the same tag in the Gunicorn access log in `/opsboard/backend`. The matching log recorded HTTP `200`.
+
+### Isolated AWS Error Drill
+
+I connected to EC2 using Systems Manager Session Manager and ran a temporary container from the same backend image as the live service. The container had no external network and was configured to connect to MySQL on its own loopback address. The live backend and RDS were left running.
+
+Inside the isolated container, `/api/health` returned `200` and `/api/incidents` returned `503`. Flask emitted an `ERROR` event with `event=database_error` and MySQL connector error code `2003`. I queried the drill's dedicated CloudWatch stream with `{ $.event = "database_error" }` and retrieved the matching JSON event.
+
+### Lesson
+
+A passing health endpoint confirms that the application can answer that request. A database-backed endpoint gives an additional signal about whether users can complete their work. A synthetic check for `/api/incidents` is a follow-up observability improvement. The next roadmap milestone is HTTPS and TLS.

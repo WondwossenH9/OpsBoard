@@ -2,6 +2,23 @@
 
 All notable changes to OpsBoard are documented in this file.
 
+## Unreleased — Centralized Application Logging
+
+### Added
+
+- Terraform-managed CloudWatch log groups for the backend, Nginx, and EC2 bootstrap, each with seven-day retention.
+- Scoped EC2 permissions for CloudWatch log stream creation and event delivery.
+- Docker `awslogs` configuration for the Gunicorn backend and Nginx containers.
+- CloudWatch Agent configuration for OpsBoard bootstrap and cloud-init logs.
+- Structured Flask `database_error` events with UTC timestamps, severity, service name, and MySQL connector error details.
+
+### Verified
+
+- Recreated the AWS application stack from a reviewed Terraform plan with 43 additions and a backend image pinned by digest.
+- Matched a successful `GET /api/incidents` request through the ALB to its Gunicorn access log in `/opsboard/backend`.
+- Confirmed that an isolated EC2 container using the deployed image returned `200` from `/api/health` and `503` from `/api/incidents` during a controlled database connection failure. A CloudWatch JSON filter found the corresponding `database_error` event.
+- Confirmed local recovery by restarting MySQL in Docker Compose and verifying that `/api/incidents` returned `200` again.
+
 ## v0.9.0 — Remote Terraform State & Workflow Hardening
 
 ### Added
