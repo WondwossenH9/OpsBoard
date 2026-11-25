@@ -2,7 +2,7 @@
 
 All notable changes to OpsBoard are documented in this file.
 
-## Unreleased — Centralized Application Logging
+## v0.10.0 — Centralized Application Logging
 
 ### Added
 
